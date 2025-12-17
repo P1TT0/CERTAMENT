@@ -86,15 +86,16 @@ function Invoke-Certament {
     $config = Load-Config -Path $ConfigPath
     Ensure-BcModule -UseLatest $config.BusinessCentral.UseLatestModule
 
-    Import-Module "$PSScriptRoot\Get-BCThumbprint.psm1" -Force
-    Import-Module "$PSScriptRoot\Get-CertDetails.psm1" -Force
-    Import-Module "$PSScriptRoot\Get-PfxFile.psm1" -Force
-    Import-Module "$PSScriptRoot\Get-PfxDetails.psm1" -Force
-    Import-Module "$PSScriptRoot\Install-PfxCert.psm1" -Force
-    Import-Module "$PSScriptRoot\Update-BCServiceCert.psm1" -Force
-    Import-Module "$PSScriptRoot\Update-IISBinding.psm1" -Force
-    Import-Module "$PSScriptRoot\Test-BCWebServices.psm1" -Force
-    Import-Module "$PSScriptRoot\Send-Notification.psm1" -Force
+    $modulesPath = Join-Path $PSScriptRoot "modules"
+    Import-Module (Join-Path $modulesPath "Get-BCThumbprint.psm1") -Force
+    Import-Module (Join-Path $modulesPath "Get-CertDetails.psm1") -Force
+    Import-Module (Join-Path $modulesPath "Get-PfxFile.psm1") -Force
+    Import-Module (Join-Path $modulesPath "Get-PfxDetails.psm1") -Force
+    Import-Module (Join-Path $modulesPath "Install-PfxCert.psm1") -Force
+    Import-Module (Join-Path $modulesPath "Update-BCServiceCert.psm1") -Force
+    Import-Module (Join-Path $modulesPath "Update-IISBinding.psm1") -Force
+    Import-Module (Join-Path $modulesPath "Test-BCWebServices.psm1") -Force
+    Import-Module (Join-Path $modulesPath "Send-Notification.psm1") -Force
 
     Write-Log -Message "Avvio CERTAMENT"
 
