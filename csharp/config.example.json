@@ -1,0 +1,17 @@
+{
+  "Pfx": {
+    "Path": "C:\\_install",
+    "Password": "",
+    "AutoSelectLatest": true
+  },
+  "BusinessCentral": {
+    "UseLatestModule": true,
+    "IisBindingSite": "Microsoft Dynamics 365 Business Central Web Client"
+  },
+  "Notifications": {
+    "EnableWebhook": false,
+    "Webhooks": {
+      "Internal": "https://your-webhook-url"
+    }
+  }
+}
