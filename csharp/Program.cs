@@ -1,28 +1,37 @@
 using System;
+using System.Threading.Tasks;
 using Serilog;
 using Certament.Services;
 using Certament.Configuration;
+using Certament.Orchestration;
 
 namespace Certament
 {
     /// <summary>
-    /// Main orchestrator for CERTAMENT certificate rotation workflow.
+    /// Main entry point for CERTAMENT.
     /// </summary>
     class Program
     {
-        static int Main(string[] args)
+        static async Task<int> Main(string[] args)
         {
             // Configure logging
             Log.Logger = new LoggerConfiguration()
                 .MinimumLevel.Information()
-                .WriteTo.Console()
-                .WriteTo.File("logs/certament-.txt", rollingInterval: RollingInterval.Day)
+                .WriteTo.Console(outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss}] [{Level:u3}] {Message:lj}{NewLine}{Exception}")
+                .WriteTo.File(
+                    "logs/certament-.txt",
+                    rollingInterval: RollingInterval.Day,
+                    outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss}] [{Level:u3}] {Message:lj}{NewLine}{Exception}",
+                    retainedFileCountLimit: 30)
                 .CreateLogger();
 
             try
             {
                 var logger = Log.ForContext<Program>();
-                logger.Information("CERTAMENT starting...");
+                logger.Information("╔════════════════════════════════════════════════════════════╗");
+                logger.Information("║         CERTAMENT – Certificate Rotation Manager           ║");
+                logger.Information("║                    v0.2.0 (C# Edition)                    ║");
+                logger.Information("╚════════════════════════════════════════════════════════════╝");
 
                 // Verify admin privileges
                 if (!IsRunningAsAdmin())
@@ -31,6 +40,14 @@ namespace Certament
                     return 1;
                 }
 
+                // Parse arguments
+                bool skipIisRestart = args.Contains("--skip-iis-restart");
+                bool dryRun = args.Contains("--dry-run");
+                bool skipNotifications = args.Contains("--skip-notifications");
+
+                if (dryRun)
+                    logger.Information("DRY RUN MODE: No changes will be applied");
+
                 // Load configuration
                 var configPath = System.IO.Path.Combine(AppContext.BaseDirectory, "config.json");
                 var configLoader = new ConfigurationLoader(logger);
@@ -38,67 +55,44 @@ namespace Certament
 
                 if (config == null)
                 {
-                    logger.Fatal("Failed to load configuration");
+                    logger.Fatal("Failed to load configuration from {ConfigPath}", configPath);
                     return 1;
                 }
 
-                // Validate PFX path
+                // Validate configuration
                 if (string.IsNullOrWhiteSpace(config.Pfx?.Path))
                 {
                     logger.Fatal("PFX path not configured");
                     return 1;
                 }
 
-                // Get PFX password
-                var pfxPassword = configLoader.ResolvePfxPassword(config);
-                if (string.IsNullOrEmpty(pfxPassword))
-                {
-                    logger.Fatal("Could not resolve PFX password");
-                    return 1;
-                }
-
-                // Services
+                // Initialize services
                 var certService = new CertificateService(logger);
                 var iisService = new IisService(logger);
+                var bcService = new BusinessCentralService(logger);
+                var notificationService = new NotificationService(logger);
 
-                // Get latest PFX
-                var pfxPath = certService.GetLatestPfxFile(config.Pfx.Path);
-                if (string.IsNullOrEmpty(pfxPath))
+                // Create and execute orchestrator
+                var orchestrator = new CertamentOrchestrator(
+                    logger,
+                    config,
+                    certService,
+                    iisService,
+                    bcService,
+                    notificationService);
+
+                var result = await orchestrator.ExecuteAsync(skipIisRestart, dryRun);
+
+                if (result)
                 {
-                    logger.Warning("No PFX file found");
+                    logger.Information("CERTAMENT completed successfully");
                     return 0;
-                }
-
-                // Import PFX
-                var importedCert = certService.ImportPfxCertificate(pfxPath, pfxPassword);
-                if (importedCert == null)
-                {
-                    logger.Error("Failed to import PFX certificate");
-                    return 1;
-                }
-
-                logger.Information("Certificate imported: {Subject}, Thumbprint: {Thumbprint}",
-                    importedCert.Subject, importedCert.Thumbprint);
-
-                // Update IIS binding
-                var siteName = config.BusinessCentral?.IisBindingSite;
-                if (!iisService.UpdateHttpsBindingCertificate(importedCert.Thumbprint, siteName))
-                {
-                    logger.Warning("Failed to update IIS binding");
-                }
-
-                // Restart IIS (optional)
-                if (args.Contains("--no-iis-restart"))
-                {
-                    logger.Information("Skipping IIS restart (--no-iis-restart)");
                 }
                 else
                 {
-                    iisService.RestartIis();
+                    logger.Error("CERTAMENT completed with errors");
+                    return 1;
                 }
-
-                logger.Information("CERTAMENT completed successfully");
-                return 0;
             }
             catch (Exception ex)
             {

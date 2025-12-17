@@ -1,0 +1,36 @@
+# Build results
+bin/
+obj/
+*.exe
+*.dll
+*.pdb
+
+# Visual Studio
+.vs/
+*.sln.user
+*.user
+
+# Build artifacts
+artifacts/
+publish/
+
+# Test results
+TestResults/
+*.trx
+
+# Logs
+logs/
+*.log
+
+# Configuration (secrets)
+config.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
