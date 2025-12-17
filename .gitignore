@@ -1,0 +1,28 @@
+# OS/editor
+.vscode/
+.idea/
+Thumbs.db
+*.log
+
+# Secrets and certs
+config.json
+*.pfx
+*.p12
+*.pem
+*.key
+*.cer
+*.crt
+*.der
+*.jks
+*.p7b
+*.p7c
+*.pfx.json
+
+# Backups
+*.bak
+
+# PowerShell state
+*.ps1xml
+
+# Misc
+.env
