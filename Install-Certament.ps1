@@ -115,6 +115,33 @@ function Write-DiagCheck {
     }
 }
 
+function Get-CertamentTaskInstallPath {
+    try {
+        $task = Get-ScheduledTask -TaskName "CERTAMENT" -ErrorAction SilentlyContinue
+        if (-not $task) { return $null }
+
+        $act = $task.Actions | Select-Object -First 1
+        if (-not $act) { return $null }
+
+        $argText = [string]$act.Arguments
+        $m = [regex]::Match($argText, '-File\s+"([^"]+)"')
+        if (-not $m.Success) { return $null }
+
+        $scriptPath = $m.Groups[1].Value
+        if ([string]::IsNullOrWhiteSpace($scriptPath)) { return $null }
+
+        $installDir = Split-Path -Path $scriptPath -Parent
+        if ([string]::IsNullOrWhiteSpace($installDir)) { return $null }
+
+        if (Test-Path (Join-Path $installDir "config.json")) {
+            return $installDir
+        }
+    }
+    catch { }
+
+    return $null
+}
+
 # ============================================================
 # DIAGNOSTICS
 # ============================================================
@@ -125,12 +152,25 @@ function Invoke-Diagnostics {
     Write-Host "  Verifica installazione CERTAMENT" -ForegroundColor Yellow
     Write-Host ""
 
-    $defaultPath = if (Test-Path (Join-Path $PSScriptRoot "config.json")) { $PSScriptRoot } else { "C:\CERTAMENT" }
+    $taskInstallPath = Get-CertamentTaskInstallPath
+    $defaultPath = if ($taskInstallPath) {
+        $taskInstallPath
+    }
+    elseif (Test-Path (Join-Path $PSScriptRoot "config.json")) {
+        $PSScriptRoot
+    }
+    else {
+        "C:\CERTAMENT"
+    }
     $checkPath   = Read-Value -Prompt "Percorso installazione da verificare" -Default $defaultPath
     $webhookTable = @{}
     $heartbeatEnabled = $false
     $heartbeatUrl = ""
     $heartbeatTimeoutSec = 10
+
+    if ($taskInstallPath) {
+        Write-Info "Installazione attiva rilevata dal task: $taskInstallPath"
+    }
 
     # ---- 1. File system ----
     Write-Host ""
@@ -163,7 +203,8 @@ function Invoke-Diagnostics {
             Write-DiagCheck -Result $true -Label "config.json e JSON valido"
             Write-DiagCheck -Result ($cfg.Pfx.Path     -and $cfg.Pfx.Path.Trim()     -ne "") -Label "config.json: Pfx.Path configurato"
             Write-DiagCheck -Result ($cfg.Pfx.Password -and $cfg.Pfx.Password.Trim() -ne "") -Label "config.json: Pfx.Password configurato"
-            Write-DiagCheck -Result ($cfg.IIS.SiteName -and $cfg.IIS.SiteName.Trim() -ne "") -Label "config.json: IIS.SiteName configurato"
+            $iisSiteConfigured = ($cfg.IIS -and $cfg.IIS.SiteName -and $cfg.IIS.SiteName.Trim() -ne "")
+            Write-DiagCheck -AsWarn -Result $iisSiteConfigured -Label "config.json: IIS.SiteName configurato"
 
             if ($cfg.Notifications -and $cfg.Notifications.Webhooks) {
                 if ($cfg.Notifications.Webhooks.Internal -and $cfg.Notifications.Webhooks.Internal.Trim() -ne "") {
@@ -313,13 +354,43 @@ function Invoke-Diagnostics {
         }
         $act = $task.Actions | Select-Object -First 1
         Write-Info "  Comando: $($act.Execute) $($act.Arguments)"
+
+        try {
+            $taskScriptPath = $null
+            $argText = [string]$act.Arguments
+            $m = [regex]::Match($argText, '-File\s+"([^"]+)"')
+            if ($m.Success) {
+                $taskScriptPath = $m.Groups[1].Value
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($taskScriptPath)) {
+                $expectedScript = Join-Path $checkPath "_MAINCertManager.ps1"
+                $taskScriptNorm = [System.IO.Path]::GetFullPath($taskScriptPath)
+                $expectedNorm = [System.IO.Path]::GetFullPath($expectedScript)
+                $sameTarget = ($taskScriptNorm -ieq $expectedNorm)
+                Write-DiagCheck -AsWarn -Result $sameTarget -Label "Task punta al path verificato"
+                if (-not $sameTarget) {
+                    Write-Info "  Task script: $taskScriptNorm"
+                    Write-Info "  Path verificato: $expectedNorm"
+                }
+            }
+        }
+        catch { }
     }
 
     # ---- 7. IIS ----
-    if ($cfg -and $cfg.IIS.SiteName) {
+    if ($cfg) {
         Write-Host ""
         Write-Host "  [IIS]" -ForegroundColor Yellow
-        $siteName  = $cfg.IIS.SiteName
+        $siteName = if ($cfg.IIS -and $cfg.IIS.SiteName -and $cfg.IIS.SiteName.Trim() -ne "") {
+            [string]$cfg.IIS.SiteName
+        }
+        else {
+            "Microsoft Dynamics 365 Business Central Web Client"
+        }
+        if (-not ($cfg.IIS -and $cfg.IIS.SiteName -and $cfg.IIS.SiteName.Trim() -ne "")) {
+            Write-Info "  IIS.SiteName non configurato: uso default '$siteName'"
+        }
         $siteFound = $false
         $siteObj   = $null
         try {
@@ -363,7 +434,10 @@ function Invoke-Diagnostics {
         $bcMod = $bcMods | Sort-Object LastWriteTime -Descending | Select-Object -First 1
         Write-Info "  Modulo BC: $($bcMod.FullName)"
         try {
-            Import-Module $bcMod.FullName -Force -ErrorAction Stop
+            $bcCommand = Get-Command -Name Get-NAVServerInstance -ErrorAction SilentlyContinue
+            if (-not $bcCommand) {
+                Import-Module $bcMod.FullName -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+            }
             $instances = @(Get-NAVServerInstance -ErrorAction Stop)
             Write-DiagCheck -AsWarn -Result ($instances.Count -gt 0) -Label "Istanze BC trovate: $($instances.Count)"
             foreach ($inst in $instances) {
@@ -529,8 +603,16 @@ function Invoke-Install {
     }
     foreach ($folder in @('modules','tools')) {
         $src = Join-Path $sourceDir $folder
+        $dst = Join-Path $installPath $folder
         if (Test-Path $src) {
-            Copy-Item -Path $src -Destination (Join-Path $installPath $folder) -Recurse -Force
+            $nestedDst = Join-Path $dst $folder
+            if (Test-Path $nestedDst) {
+                Remove-Item -Path $nestedDst -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            Get-ChildItem -Path $src -Force | ForEach-Object {
+                Copy-Item -Path $_.FullName -Destination $dst -Recurse -Force
+            }
             Write-Ok "Copiato: $folder\"
         }
     }

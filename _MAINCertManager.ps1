@@ -70,8 +70,14 @@ if ($config.BusinessCentral.UseLatestModule -eq $true) {
     }
 
     $bcModulePath = $bcModulePaths | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
-    Import-Module $bcModulePath -Force | Out-Null
-    Write-Host "Modulo BC importato da: $bcModulePath"
+    $bcCommand = Get-Command -Name Get-NAVServerInstance -ErrorAction SilentlyContinue
+    if (-not $bcCommand) {
+        Import-Module $bcModulePath -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+        Write-Host "Modulo BC importato da: $bcModulePath"
+    }
+    else {
+        Write-Host "Modulo BC gia disponibile in sessione."
+    }
 }
 
 # ============================================================
