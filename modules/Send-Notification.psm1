@@ -18,7 +18,7 @@ function Send-Notification {
     $uri = $Webhooks[$Target]
     if (-not $uri) {
         Write-Warning "Nessun webhook configurato per '$Target'. Notifica ignorata."
-        return
+        return $false
     }
 
     $payload = @{
@@ -51,9 +51,11 @@ function Send-Notification {
     try {
         Invoke-RestMethod -Method POST -Uri $uri -ContentType "application/json; charset=utf-8" -Body $payload -ErrorAction Stop
         Write-Host "Notifica inviata a ${Target}: ${Title}"
+        return $true
     }
     catch {
         Write-Warning "Errore nell'invio notifica a ${Target}: $($_.Exception.Message)"
+        return $false
     }
 }
 

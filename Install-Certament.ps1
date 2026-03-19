@@ -127,12 +127,17 @@ function Invoke-Diagnostics {
 
     $defaultPath = if (Test-Path (Join-Path $PSScriptRoot "config.json")) { $PSScriptRoot } else { "C:\CERTAMENT" }
     $checkPath   = Read-Value -Prompt "Percorso installazione da verificare" -Default $defaultPath
+    $webhookTable = @{}
+    $heartbeatEnabled = $false
+    $heartbeatUrl = ""
+    $heartbeatTimeoutSec = 10
 
     # ---- 1. File system ----
     Write-Host ""
     Write-Host "  [File di installazione]" -ForegroundColor Yellow
     $requiredFiles = @(
         "_MAINCertManager.ps1",
+        "Install-Certament.ps1",
         "config.json",
         "modules\Get-CertDetails.psm1",
         "modules\Get-PfxFile.psm1",
@@ -159,6 +164,36 @@ function Invoke-Diagnostics {
             Write-DiagCheck -Result ($cfg.Pfx.Path     -and $cfg.Pfx.Path.Trim()     -ne "") -Label "config.json: Pfx.Path configurato"
             Write-DiagCheck -Result ($cfg.Pfx.Password -and $cfg.Pfx.Password.Trim() -ne "") -Label "config.json: Pfx.Password configurato"
             Write-DiagCheck -Result ($cfg.IIS.SiteName -and $cfg.IIS.SiteName.Trim() -ne "") -Label "config.json: IIS.SiteName configurato"
+
+            if ($cfg.Notifications -and $cfg.Notifications.Webhooks) {
+                if ($cfg.Notifications.Webhooks.Internal -and $cfg.Notifications.Webhooks.Internal.Trim() -ne "") {
+                    $webhookTable['Internal'] = [string]$cfg.Notifications.Webhooks.Internal
+                }
+                if ($cfg.Notifications.Webhooks.Customer -and $cfg.Notifications.Webhooks.Customer.Trim() -ne "") {
+                    $webhookTable['Customer'] = [string]$cfg.Notifications.Webhooks.Customer
+                }
+            }
+            Write-DiagCheck -AsWarn -Result $webhookTable.ContainsKey('Internal') -Label "config.json: webhook Internal configurato"
+            Write-DiagCheck -AsWarn -Result $webhookTable.ContainsKey('Customer') -Label "config.json: webhook Customer configurato"
+
+            if ($cfg.Heartbeat) {
+                $heartbeatEnabled = ($cfg.Heartbeat.Enabled -eq $true)
+                if ($cfg.Heartbeat.Url) {
+                    $heartbeatUrl = [string]$cfg.Heartbeat.Url
+                }
+                if ($cfg.Heartbeat.TimeoutSec) {
+                    try {
+                        $parsedHbTimeout = [int]$cfg.Heartbeat.TimeoutSec
+                        if ($parsedHbTimeout -gt 0) { $heartbeatTimeoutSec = $parsedHbTimeout }
+                    }
+                    catch { }
+                }
+            }
+            Write-DiagCheck -AsWarn -Result $heartbeatEnabled -Label "config.json: Heartbeat.Enabled"
+            if ($heartbeatEnabled) {
+                Write-DiagCheck -Result (-not [string]::IsNullOrWhiteSpace($heartbeatUrl)) -Label "config.json: Heartbeat.Url configurato"
+            }
+
             if ($cfg.Pfx.Path) {
                 Write-DiagCheck -AsWarn -Result (Test-Path $cfg.Pfx.Path) -Label "Cartella PFX esiste ($($cfg.Pfx.Path))"
                 if (Test-Path $cfg.Pfx.Path) {
@@ -205,7 +240,67 @@ function Invoke-Diagnostics {
         }
     }
 
-    # ---- 4. Scheduled Task ----
+    # ---- 4. Notifications test ----
+    Write-Host ""
+    Write-Host "  [Notifiche]" -ForegroundColor Yellow
+    $notifCmd = Get-Command Send-Notification -ErrorAction SilentlyContinue
+    Write-DiagCheck -AsWarn -Result ($null -ne $notifCmd) -Label "Funzione Send-Notification disponibile"
+
+    if ($notifCmd -and $webhookTable.ContainsKey('Internal')) {
+        $testTitle = "CERTAMENT - Test notifica Internal"
+        $testMsg = "Test invio notifica da diagnostica CERTAMENT su $env:COMPUTERNAME ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))"
+        $sentInternal = Send-Notification -Title $testTitle -Message $testMsg -Target "Internal" -Webhooks $webhookTable
+        Write-DiagCheck -AsWarn -Result ([bool]$sentInternal) -Label "Invio notifica test Internal"
+    }
+
+    if ($notifCmd -and $webhookTable.ContainsKey('Customer')) {
+        $testCustomer = Read-YesNo -Prompt "Inviare test notifica anche al webhook Customer?" -Default $false
+        if ($testCustomer) {
+            $testTitle = "CERTAMENT - Test notifica Customer"
+            $testMsg = "Test invio notifica da diagnostica CERTAMENT su $env:COMPUTERNAME ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))"
+            $sentCustomer = Send-Notification -Title $testTitle -Message $testMsg -Target "Customer" -Webhooks $webhookTable
+            Write-DiagCheck -AsWarn -Result ([bool]$sentCustomer) -Label "Invio notifica test Customer"
+        }
+        else {
+            Write-Info "  Test webhook Customer saltato."
+        }
+    }
+
+    # ---- 5. Heartbeat test ----
+    Write-Host ""
+    Write-Host "  [Heartbeat Azure]" -ForegroundColor Yellow
+    if ($heartbeatEnabled -and -not [string]::IsNullOrWhiteSpace($heartbeatUrl)) {
+        $hbPayload = @{
+            tool      = "CERTAMENT"
+            server    = $env:COMPUTERNAME
+            status    = "Diagnostics"
+            stage     = "Install-Certament"
+            detail    = "Heartbeat test da diagnostica"
+            timestamp = (Get-Date).ToString('o')
+        } | ConvertTo-Json -Depth 6
+
+        try {
+            Invoke-RestMethod -Method POST -Uri $heartbeatUrl -ContentType "application/json; charset=utf-8" `
+                -Body $hbPayload -TimeoutSec $heartbeatTimeoutSec -ErrorAction Stop | Out-Null
+            Write-DiagCheck -Result $true -Label "Heartbeat Azure inviato"
+        }
+        catch {
+            $hbErr = if ($_.Exception) { $_.Exception.Message } else { $_.ToString() }
+            Write-DiagCheck -Result $false -Label "Heartbeat Azure inviato" -Detail $hbErr
+
+            if ($notifCmd -and $webhookTable.ContainsKey('Internal')) {
+                $alertTitle = "CERTAMENT - Errore heartbeat"
+                $alertMsg = "Heartbeat Azure fallito durante diagnostica su $env:COMPUTERNAME.`nErrore: $hbErr"
+                $alertSent = Send-Notification -Title $alertTitle -Message $alertMsg -Target "Internal" -Webhooks $webhookTable
+                Write-DiagCheck -AsWarn -Result ([bool]$alertSent) -Label "Alert interno su errore heartbeat"
+            }
+        }
+    }
+    else {
+        Write-DiagCheck -AsWarn -Result $false -Label "Heartbeat Azure abilitato e configurato"
+    }
+
+    # ---- 6. Scheduled Task ----
     Write-Host ""
     Write-Host "  [Scheduled Task]" -ForegroundColor Yellow
     $task = Get-ScheduledTask -TaskName "CERTAMENT" -ErrorAction SilentlyContinue
@@ -220,7 +315,7 @@ function Invoke-Diagnostics {
         Write-Info "  Comando: $($act.Execute) $($act.Arguments)"
     }
 
-    # ---- 5. IIS ----
+    # ---- 7. IIS ----
     if ($cfg -and $cfg.IIS.SiteName) {
         Write-Host ""
         Write-Host "  [IIS]" -ForegroundColor Yellow
@@ -258,7 +353,7 @@ function Invoke-Diagnostics {
         }
     }
 
-    # ---- 6. Business Central ----
+    # ---- 8. Business Central ----
     Write-Host ""
     Write-Host "  [Business Central]" -ForegroundColor Yellow
     $bcMods = @(Get-ChildItem "C:\Program Files\Microsoft Dynamics 365 Business Central" `
@@ -350,6 +445,26 @@ function Invoke-Install {
     $webhookCustomer = Read-Value -Prompt "Webhook Customer (Teams)" -AllowEmpty
     $webhookInternal = Read-Value -Prompt "Webhook Internal (Teams)" -AllowEmpty
 
+    Write-Info "Heartbeat Azure per monitoraggio del tool (consigliato)."
+    $heartbeatEnabled = Read-YesNo -Prompt "Abilitare heartbeat Azure?" -Default $true
+    $heartbeatUrl = ""
+    $heartbeatTimeoutSec = 10
+    if ($heartbeatEnabled) {
+        $heartbeatUrl = Read-Value -Prompt "URL endpoint heartbeat Azure" -AllowEmpty
+        if ([string]::IsNullOrWhiteSpace($heartbeatUrl)) {
+            Write-Warn "URL heartbeat non specificato: heartbeat disabilitato."
+            $heartbeatEnabled = $false
+        }
+        else {
+            $timeoutRaw = Read-Value -Prompt "Timeout heartbeat (secondi)" -Default "10"
+            while ($timeoutRaw -notmatch '^\d+$' -or [int]$timeoutRaw -le 0) {
+                Write-Warn "Inserire un numero intero positivo."
+                $timeoutRaw = Read-Value -Prompt "Timeout heartbeat (secondi)" -Default "10"
+            }
+            $heartbeatTimeoutSec = [int]$timeoutRaw
+        }
+    }
+
     Write-Info "Quanti giorni prima della scadenza avviare il processo di rinnovo?"
     $notifyDays = Read-Value -Prompt "Giorni soglia scadenza" -Default "30"
     while ($notifyDays -notmatch '^\d+$') {
@@ -376,6 +491,7 @@ function Invoke-Install {
     Write-Host ("  |  Riavvio IIS            : {0}" -f ($(if ($iisRestart) {"Si"} else {"No"}).PadRight(27))) -ForegroundColor White
     Write-Host ("  |  Webhook Customer       : {0}" -f ($(if ($webhookCustomer) {"Configurato"} else {"Disabilitato"}).PadRight(27))) -ForegroundColor White
     Write-Host ("  |  Webhook Internal       : {0}" -f ($(if ($webhookInternal) {"Configurato"} else {"Disabilitato"}).PadRight(27))) -ForegroundColor White
+    Write-Host ("  |  Heartbeat Azure        : {0}" -f ($(if ($heartbeatEnabled) {"Si ($heartbeatTimeoutSec sec)"} else {"No"}).PadRight(27))) -ForegroundColor White
     Write-Host ("  |  Soglia scadenza        : {0} giorni" -f $notifyDays.PadRight(21)) -ForegroundColor White
     Write-Host ("  |  Scheduled Task         : {0}" -f ($(if ($createTask) {"Si, alle $taskTime"} else {"No"}).PadRight(27))) -ForegroundColor White
     Write-Host "  +-----------------------------------------------------+" -ForegroundColor White
@@ -451,6 +567,12 @@ function Invoke-Install {
                 NotifyBeforeDays           = [int]$notifyDays
                 EnableCustomerNotification = $true
             }
+        }
+        Heartbeat = [ordered]@{
+            Enabled                 = $heartbeatEnabled
+            Url                     = $heartbeatUrl
+            TimeoutSec              = [int]$heartbeatTimeoutSec
+            NotifyInternalOnFailure = $true
         }
     }
 

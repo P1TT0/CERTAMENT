@@ -26,5 +26,11 @@
       "NotifyBeforeDays": 365,
       "EnableCustomerNotification": true
     }
+  },
+  "Heartbeat": {
+    "Enabled": true,
+    "Url": "<SET_AZURE_HEARTBEAT_URL>",
+    "TimeoutSec": 10,
+    "NotifyInternalOnFailure": true
   }
 }

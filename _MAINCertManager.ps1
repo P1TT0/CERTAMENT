@@ -91,6 +91,8 @@ $moduleDir = Join-Path $PSScriptRoot "modules"
     Import-Module (Join-Path $moduleDir "$_.psm1") -Force
 }
 
+$script:HeartbeatFailureNotified = $false
+
 # ============================================================
 # Helper: build webhook hashtable from config
 # ============================================================
@@ -108,7 +110,7 @@ function Send-FailureNotification {
     param([string]$Context, [string]$ErrorDetail)
 
     $webhooks = Get-WebhookTable
-    if (-not $webhooks.Count) { return }
+    if (-not $webhooks.ContainsKey('Internal')) { return }
 
     $hostname = $env:COMPUTERNAME
     $msg = @"
@@ -122,6 +124,93 @@ Si e' verificato un errore durante l'esecuzione di CERTAMENT sul server **$hostn
 }
 
 # ============================================================
+# Helper: heartbeat settings
+# ============================================================
+function Get-HeartbeatSettings {
+    $enabled = $false
+    $url = $null
+    $timeoutSec = 10
+    $notifyInternalOnFailure = $true
+
+    if ($config.Heartbeat) {
+        if ($null -ne $config.Heartbeat.Enabled) {
+            $enabled = ($config.Heartbeat.Enabled -eq $true)
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace([string]$config.Heartbeat.Url)) {
+            $url = [string]$config.Heartbeat.Url
+        }
+
+        if ($null -ne $config.Heartbeat.TimeoutSec) {
+            try {
+                $parsedTimeout = [int]$config.Heartbeat.TimeoutSec
+                if ($parsedTimeout -gt 0) { $timeoutSec = $parsedTimeout }
+            }
+            catch { }
+        }
+
+        if ($null -ne $config.Heartbeat.NotifyInternalOnFailure) {
+            $notifyInternalOnFailure = ($config.Heartbeat.NotifyInternalOnFailure -eq $true)
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($url)) {
+        $enabled = $false
+    }
+
+    return [PSCustomObject]@{
+        Enabled                 = $enabled
+        Url                     = $url
+        TimeoutSec              = $timeoutSec
+        NotifyInternalOnFailure = $notifyInternalOnFailure
+    }
+}
+
+# ============================================================
+# Helper: send heartbeat to Azure
+# ============================================================
+function Invoke-Heartbeat {
+    param(
+        [string]$Status,
+        [string]$Stage,
+        [string]$Detail = ""
+    )
+
+    $hb = Get-HeartbeatSettings
+    if (-not $hb.Enabled) { return $true }
+
+    $payload = @{
+        tool      = "CERTAMENT"
+        server    = $env:COMPUTERNAME
+        status    = $Status
+        stage     = $Stage
+        detail    = $Detail
+        timestamp = (Get-Date).ToString('o')
+    } | ConvertTo-Json -Depth 6
+
+    try {
+        Invoke-RestMethod -Method POST -Uri $hb.Url -ContentType "application/json; charset=utf-8" `
+            -Body $payload -TimeoutSec $hb.TimeoutSec -ErrorAction Stop | Out-Null
+        Write-Host "Heartbeat Azure inviato: $Status / $Stage"
+        return $true
+    }
+    catch {
+        $errMsg = if ($_.Exception) { $_.Exception.Message } else { $_.ToString() }
+        Write-Warning "Heartbeat Azure fallito ($Status / $Stage): $errMsg"
+
+        if ($hb.NotifyInternalOnFailure -and -not $script:HeartbeatFailureNotified) {
+            $script:HeartbeatFailureNotified = $true
+            try {
+                Send-FailureNotification -Context "Heartbeat Azure ($Status / $Stage)" -ErrorDetail $errMsg
+            }
+            catch { }
+        }
+
+        return $false
+    }
+}
+
+# ============================================================
 # Main
 # ============================================================
 function Main {
@@ -132,6 +221,9 @@ function Main {
     $webhooks = Get-WebhookTable
     $hostname = $env:COMPUTERNAME
     $pfxPath = $config.Pfx.Path
+    $hadPipelineErrors = $false
+
+    Invoke-Heartbeat -Status "Started" -Stage "MainStart" -Detail "Esecuzione CERTAMENT avviata" | Out-Null
     $notifyBeforeDaysRaw = $null
     if ($config.Notifications -and $config.Notifications.CertificateExpiry) {
         $notifyBeforeDaysRaw = $config.Notifications.CertificateExpiry.NotifyBeforeDays
@@ -160,6 +252,7 @@ function Main {
     if (-not $thumbprint) {
         Write-Warning "Nessun certificato configurato in Business Central."
         Send-FailureNotification -Context "Lettura certificato BC" -ErrorDetail "Nessun thumbprint trovato nelle istanze BC."
+        Invoke-Heartbeat -Status "Error" -Stage "ReadBCThumbprint" -Detail "Nessun thumbprint BC configurato" | Out-Null
         Stop-Transcript | Out-Null
         return
     }
@@ -171,6 +264,7 @@ function Main {
     $certDetails = $thumbprint | Get-CertDetails
     if (-not $certDetails) {
         Send-FailureNotification -Context "Dettagli certificato" -ErrorDetail "Certificato $thumbprint non trovato nello store."
+        Invoke-Heartbeat -Status "Error" -Stage "ReadCertDetails" -Detail "Certificato attuale non trovato nello store" | Out-Null
         Stop-Transcript | Out-Null
         return
     }
@@ -188,6 +282,7 @@ function Main {
     # ----------------------------------------------------------
     if ($daysLeft -gt $expiryThreshold) {
         Write-Host "`nCertificato valido. Nessuna azione necessaria."
+        Invoke-Heartbeat -Status "Healthy" -Stage "NoActionNeeded" -Detail "Certificato valido ($daysLeft giorni rimanenti)" | Out-Null
         Stop-Transcript | Out-Null
         return
     }
@@ -207,6 +302,7 @@ function Main {
                 -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni**.`nCaricare un nuovo PFX sul server **$hostname** in: **$pfxPath**") `
                 -Target "Customer" -Webhooks $webhooks
         }
+        Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxMissing" -Detail "Nessun PFX trovato in $pfxPath" | Out-Null
         Stop-Transcript | Out-Null
         return
     }
@@ -226,6 +322,7 @@ function Main {
                 -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni** ma il PFX non e' leggibile.`nCaricare un nuovo PFX su **$hostname** in: **$pfxPath**") `
                 -Target "Customer" -Webhooks $webhooks
         }
+        Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxUnreadable" -Detail $_.Exception.Message | Out-Null
         Stop-Transcript | Out-Null
         return
     }
@@ -238,6 +335,7 @@ function Main {
                 -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni**.`nIl PFX presente in **$pfxPath** non contiene un certificato piu recente.`nCaricare un nuovo PFX aggiornato.") `
                 -Target "Customer" -Webhooks $webhooks
         }
+        Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxNotNewer" -Detail "PFX presente ma non piu recente del certificato attuale" | Out-Null
         Stop-Transcript | Out-Null
         return
     }
@@ -249,6 +347,7 @@ function Main {
     $installedCert = Install-PfxCert -PfxPath $pfxFile -Password $pfxPassword
     if (-not $installedCert -or $installedCert -eq $false) {
         Send-FailureNotification -Context "Installazione PFX" -ErrorDetail "Install-PfxCert ha restituito errore per $pfxFile"
+        Invoke-Heartbeat -Status "Error" -Stage "InstallPfx" -Detail "Install-PfxCert fallita" | Out-Null
         Stop-Transcript | Out-Null
         return
     }
@@ -265,6 +364,7 @@ function Main {
     if ($bcErrors.Count -gt 0) {
         $errText = ($bcErrors | ForEach-Object { "$($_.Instance): $($_.ErrorMessage)" }) -join "; "
         Send-FailureNotification -Context "Aggiornamento BC" -ErrorDetail $errText
+        $hadPipelineErrors = $true
     }
 
     # Update IIS
@@ -275,6 +375,7 @@ function Main {
     }
     catch {
         Send-FailureNotification -Context "Aggiornamento IIS" -ErrorDetail $_.Exception.Message
+        $hadPipelineErrors = $true
     }
 
     # Smoke test
@@ -297,6 +398,13 @@ Servizi BC e IIS aggiornati.
         Send-Notification -Title "CERTAMENT - Certificato aggiornato" -Message $msg -Target "Internal" -Webhooks $webhooks
     }
 
+    if ($hadPipelineErrors) {
+        Invoke-Heartbeat -Status "CompletedWithWarnings" -Stage "MainEnd" -Detail "Pipeline completata con warning/errori parziali" | Out-Null
+    }
+    else {
+        Invoke-Heartbeat -Status "Completed" -Stage "MainEnd" -Detail "Pipeline completata con successo" | Out-Null
+    }
+
     Write-Host "`nCERTAMENT completato con successo."
 }
 
@@ -305,6 +413,7 @@ try {
 }
 catch {
     Write-Error "Errore critico CERTAMENT: $($_.Exception.Message)"
+    try { Invoke-Heartbeat -Status "Error" -Stage "UnhandledException" -Detail $_.Exception.Message | Out-Null } catch {}
     try { Send-FailureNotification -Context "Errore critico" -ErrorDetail $_.Exception.Message } catch {}
 }
 finally {
