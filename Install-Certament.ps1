@@ -431,41 +431,69 @@ function Invoke-Diagnostics {
         -Recurse -Filter "Microsoft.Dynamics.Nav.Management.psm1" -ErrorAction SilentlyContinue)
     Write-DiagCheck -AsWarn -Result ($bcMods.Count -gt 0) -Label "Modulo BC trovato su disco ($($bcMods.Count) versioni)"
     if ($bcMods.Count -gt 0) {
-        $bcMod = $bcMods | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        Write-Info "  Modulo BC: $($bcMod.FullName)"
+        $orderedBcMods = $bcMods | Sort-Object `
+            @{ Expression = { if ($_.FullName -match '\\Admin\\') { 1 } else { 0 } } }, `
+            @{ Expression = 'LastWriteTime'; Descending = $true }
+
+        $selectedBcPath = $null
         try {
             $bcCommand = Get-Command -Name Get-NAVServerInstance -ErrorAction SilentlyContinue
-            if (-not $bcCommand) {
-                Import-Module $bcMod.FullName -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+
+            if ($bcCommand) {
+                $selectedBcPath = $bcCommand.Source
             }
-            $instances = @(Get-NAVServerInstance -ErrorAction Stop)
-            Write-DiagCheck -AsWarn -Result ($instances.Count -gt 0) -Label "Istanze BC trovate: $($instances.Count)"
-            foreach ($inst in $instances) {
-                $iName  = $inst.ServerInstance
-                $iState = $inst.State
-                $thumb  = $null
-                try { $thumb = Get-NAVServerConfiguration -ServerInstance $iName -KeyName "ServicesCertificateThumbprint" -ErrorAction SilentlyContinue } catch { }
-                if ($thumb -and $thumb.Trim() -ne "") {
-                    $thumbNorm = ($thumb -replace '\s', '').ToUpper()
-                    $certObj   = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
-                                    Where-Object { ($_.Thumbprint -replace '\s', '').ToUpper() -eq $thumbNorm }
-                    if ($certObj) {
-                        $daysLeft   = (New-TimeSpan -Start (Get-Date) -End $certObj.NotAfter).Days
-                        $thumbShort = $thumbNorm.Substring(0, [Math]::Min(12, $thumbNorm.Length))
-                        Write-Info "  $iName [$iState] thumb: ${thumbShort}...  scade: $($certObj.NotAfter.ToString('yyyy-MM-dd')) ($daysLeft gg)"
-                        Write-DiagCheck -Result ($daysLeft -gt 0) -Label "Certificato non scaduto: $iName"
-                        if ($cfg.Notifications.CertificateExpiry.NotifyBeforeDays) {
-                            $threshold = [int]$cfg.Notifications.CertificateExpiry.NotifyBeforeDays
-                            Write-DiagCheck -AsWarn -Result ($daysLeft -gt $threshold) `
-                                -Label "Certificato sopra soglia rinnovo ($daysLeft gg rimasti, soglia: $threshold gg) - $iName"
+            else {
+                foreach ($bcCandidate in $orderedBcMods) {
+                    try {
+                        Remove-Module -Name Microsoft.Dynamics.Nav.Management -ErrorAction SilentlyContinue
+                        Import-Module $bcCandidate.FullName -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+
+                        $bcCommand = Get-Command -Name Get-NAVServerInstance -ErrorAction SilentlyContinue
+                        if ($bcCommand) {
+                            $selectedBcPath = $bcCandidate.FullName
+                            break
+                        }
+                    }
+                    catch { }
+                }
+            }
+
+            if (-not $selectedBcPath) {
+                Write-DiagCheck -AsWarn -Result $false -Label "Import modulo BC funzionante" -Detail "Get-NAVServerInstance non disponibile"
+            }
+
+            if ($selectedBcPath) {
+                Write-Info "  Modulo BC: $selectedBcPath"
+
+                $instances = @(Get-NAVServerInstance -ErrorAction Stop)
+                Write-DiagCheck -AsWarn -Result ($instances.Count -gt 0) -Label "Istanze BC trovate: $($instances.Count)"
+                foreach ($inst in $instances) {
+                    $iName  = $inst.ServerInstance
+                    $iState = $inst.State
+                    $thumb  = $null
+                    try { $thumb = Get-NAVServerConfiguration -ServerInstance $iName -KeyName "ServicesCertificateThumbprint" -ErrorAction SilentlyContinue } catch { }
+                    if ($thumb -and $thumb.Trim() -ne "") {
+                        $thumbNorm = ($thumb -replace '\s', '').ToUpper()
+                        $certObj   = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+                                        Where-Object { ($_.Thumbprint -replace '\s', '').ToUpper() -eq $thumbNorm }
+                        if ($certObj) {
+                            $daysLeft   = (New-TimeSpan -Start (Get-Date) -End $certObj.NotAfter).Days
+                            $thumbShort = $thumbNorm.Substring(0, [Math]::Min(12, $thumbNorm.Length))
+                            Write-Info "  $iName [$iState] thumb: ${thumbShort}...  scade: $($certObj.NotAfter.ToString('yyyy-MM-dd')) ($daysLeft gg)"
+                            Write-DiagCheck -Result ($daysLeft -gt 0) -Label "Certificato non scaduto: $iName"
+                            if ($cfg.Notifications.CertificateExpiry.NotifyBeforeDays) {
+                                $threshold = [int]$cfg.Notifications.CertificateExpiry.NotifyBeforeDays
+                                Write-DiagCheck -AsWarn -Result ($daysLeft -gt $threshold) `
+                                    -Label "Certificato sopra soglia rinnovo ($daysLeft gg rimasti, soglia: $threshold gg) - $iName"
+                            }
+                        } else {
+                            $thumbShort = $thumbNorm.Substring(0, [Math]::Min(12, $thumbNorm.Length))
+                            Write-DiagCheck -Result $false -Label "Certificato nello store per $iName" `
+                                -Detail "Thumb ${thumbShort}... non trovato in LocalMachine\My"
                         }
                     } else {
-                        $thumbShort = $thumbNorm.Substring(0, [Math]::Min(12, $thumbNorm.Length))
-                        Write-DiagCheck -Result $false -Label "Certificato nello store per $iName" `
-                            -Detail "Thumb ${thumbShort}... non trovato in LocalMachine\My"
+                        Write-Info "  $iName [$iState] nessun thumbprint configurato"
                     }
-                } else {
-                    Write-Info "  $iName [$iState] nessun thumbprint configurato"
                 }
             }
         } catch {

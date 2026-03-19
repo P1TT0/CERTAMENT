@@ -59,24 +59,55 @@ if ($config.Logging.RetentionDays) {
 # Import BC Management Module
 # ============================================================
 if ($config.BusinessCentral.UseLatestModule -eq $true) {
-    $bcModulePaths = Get-ChildItem -Path "C:\Program Files\Microsoft Dynamics 365 Business Central" `
-        -Recurse -Filter "Microsoft.Dynamics.Nav.Management.psm1" `
-        -ErrorAction SilentlyContinue
-
-    if (-not $bcModulePaths) {
-        Write-Error "Nessun modulo Business Central trovato."
-        Stop-Transcript | Out-Null
-        exit 1
-    }
-
-    $bcModulePath = $bcModulePaths | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
     $bcCommand = Get-Command -Name Get-NAVServerInstance -ErrorAction SilentlyContinue
-    if (-not $bcCommand) {
-        Import-Module $bcModulePath -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
-        Write-Host "Modulo BC importato da: $bcModulePath"
+    if ($bcCommand) {
+        Write-Host "Modulo BC gia disponibile in sessione."
     }
     else {
-        Write-Host "Modulo BC gia disponibile in sessione."
+        $bcModulePaths = Get-ChildItem -Path "C:\Program Files\Microsoft Dynamics 365 Business Central" `
+            -Recurse -Filter "Microsoft.Dynamics.Nav.Management.psm1" `
+            -ErrorAction SilentlyContinue
+
+        if (-not $bcModulePaths) {
+            Write-Error "Nessun modulo Business Central trovato."
+            Stop-Transcript | Out-Null
+            exit 1
+        }
+
+        $orderedCandidates = $bcModulePaths | Sort-Object `
+            @{ Expression = { if ($_.FullName -match '\\Admin\\') { 1 } else { 0 } } }, `
+            @{ Expression = 'LastWriteTime'; Descending = $true }
+
+        $importedPath = $null
+        $importErrors = @()
+
+        foreach ($candidate in $orderedCandidates) {
+            try {
+                Remove-Module -Name Microsoft.Dynamics.Nav.Management -ErrorAction SilentlyContinue
+                Import-Module $candidate.FullName -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+
+                $bcCommand = Get-Command -Name Get-NAVServerInstance -ErrorAction SilentlyContinue
+                if ($bcCommand) {
+                    $importedPath = $candidate.FullName
+                    break
+                }
+
+                $importErrors += ("{0} -> cmdlet Get-NAVServerInstance non disponibile" -f $candidate.FullName)
+            }
+            catch {
+                $errMsg = if ($_.Exception) { $_.Exception.Message } else { $_.ToString() }
+                $importErrors += ("{0} -> {1}" -f $candidate.FullName, $errMsg)
+            }
+        }
+
+        if (-not $importedPath) {
+            $firstErrors = ($importErrors | Select-Object -First 5) -join "`n"
+            Write-Error "Nessun modulo BC importabile in questa sessione. Errori principali:`n$firstErrors"
+            Stop-Transcript | Out-Null
+            exit 1
+        }
+
+        Write-Host "Modulo BC importato da: $importedPath"
     }
 }
 
@@ -221,7 +252,7 @@ function Invoke-Heartbeat {
 # ============================================================
 function Main {
     Write-Host ("=" * 60)
-    Write-Host "CERTAMENT - Avvio [{0}] su {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $env:COMPUTERNAME
+    Write-Host ("CERTAMENT - Avvio [{0}] su {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $env:COMPUTERNAME)
     Write-Host ("=" * 60)
 
     $webhooks = Get-WebhookTable
