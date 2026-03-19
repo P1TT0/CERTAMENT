@@ -11,6 +11,10 @@
     .\Install-Certament.ps1
 #>
 
+param(
+    [switch]$WaitAtEnd
+)
+
 Set-StrictMode -Off
 $ErrorActionPreference = 'Stop'
 
@@ -20,17 +24,17 @@ $ErrorActionPreference = 'Stop'
 function Write-Banner {
     Clear-Host
     Write-Host ""
-    Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "  ║           CERTAMENT  -  Installer v1.0              ║" -ForegroundColor Cyan
-    Write-Host "  ║    Automated certificate manager for BC + IIS       ║" -ForegroundColor Cyan
-    Write-Host "  ╚══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host "  +======================================================+" -ForegroundColor Cyan
+    Write-Host "  |           CERTAMENT  -  Installer v1.0              |" -ForegroundColor Cyan
+    Write-Host "  |    Automated certificate manager for BC + IIS       |" -ForegroundColor Cyan
+    Write-Host "  +======================================================+" -ForegroundColor Cyan
     Write-Host ""
 }
 
 function Write-Step {
     param([int]$n, [int]$total, [string]$label)
     Write-Host ""
-    Write-Host "  ── Step $n/$total : $label ──" -ForegroundColor Yellow
+    Write-Host "  --- Step $n/$total : $label ---" -ForegroundColor Yellow
     Write-Host ""
 }
 
@@ -88,7 +92,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Write-Host ""
     Write-Host "  CERTAMENT Installer richiede privilegi di Amministratore." -ForegroundColor Red
     Write-Host "  Rilancio con elevazione..." -ForegroundColor Yellow
-    Start-Process powershell "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', "`"$PSCommandPath`"", '-WaitAtEnd') -Verb RunAs
     exit
 }
 
@@ -150,16 +154,16 @@ if ($createTask) {
 # ---------- Step 6: Confirm ----------
 Write-Step 6 6 "Riepilogo"
 
-Write-Host "  ┌─────────────────────────────────────────────────────┐" -ForegroundColor White
-Write-Host ("  │  Percorso installazione : {0}" -f $installPath.PadRight(27)) -ForegroundColor White
-Write-Host ("  │  Cartella PFX           : {0}" -f $pfxPath.PadRight(27)) -ForegroundColor White
-Write-Host ("  │  Sito IIS               : {0}" -f ($iisSiteName.Substring(0, [Math]::Min(27, $iisSiteName.Length))).PadRight(27)) -ForegroundColor White
-Write-Host ("  │  Riavvio IIS            : {0}" -f ($(if ($iisRestart) {"Si"} else {"No"}).PadRight(27))) -ForegroundColor White
-Write-Host ("  │  Webhook Customer       : {0}" -f ($(if ($webhookCustomer) {"Configurato"} else {"Disabilitato"}).PadRight(27))) -ForegroundColor White
-Write-Host ("  │  Webhook Internal       : {0}" -f ($(if ($webhookInternal) {"Configurato"} else {"Disabilitato"}).PadRight(27))) -ForegroundColor White
-Write-Host ("  │  Soglia scadenza        : {0} giorni" -f $notifyDays.PadRight(21)) -ForegroundColor White
-Write-Host ("  │  Scheduled Task         : {0}" -f ($(if ($createTask) {"Si, alle $taskTime"} else {"No"}).PadRight(27))) -ForegroundColor White
-Write-Host "  └─────────────────────────────────────────────────────┘" -ForegroundColor White
+Write-Host "  +-----------------------------------------------------+" -ForegroundColor White
+Write-Host ("  |  Percorso installazione : {0}" -f $installPath.PadRight(27)) -ForegroundColor White
+Write-Host ("  |  Cartella PFX           : {0}" -f $pfxPath.PadRight(27)) -ForegroundColor White
+Write-Host ("  |  Sito IIS               : {0}" -f ($iisSiteName.Substring(0, [Math]::Min(27, $iisSiteName.Length))).PadRight(27)) -ForegroundColor White
+Write-Host ("  |  Riavvio IIS            : {0}" -f ($(if ($iisRestart) {"Si"} else {"No"}).PadRight(27))) -ForegroundColor White
+Write-Host ("  |  Webhook Customer       : {0}" -f ($(if ($webhookCustomer) {"Configurato"} else {"Disabilitato"}).PadRight(27))) -ForegroundColor White
+Write-Host ("  |  Webhook Internal       : {0}" -f ($(if ($webhookInternal) {"Configurato"} else {"Disabilitato"}).PadRight(27))) -ForegroundColor White
+Write-Host ("  |  Soglia scadenza        : {0} giorni" -f $notifyDays.PadRight(21)) -ForegroundColor White
+Write-Host ("  |  Scheduled Task         : {0}" -f ($(if ($createTask) {"Si, alle $taskTime"} else {"No"}).PadRight(27))) -ForegroundColor White
+Write-Host "  +-----------------------------------------------------+" -ForegroundColor White
 Write-Host ""
 
 $confirm = Read-YesNo -Prompt "Procedere con l'installazione?" -Default $true
@@ -240,41 +244,140 @@ Write-Ok "config.json scritto: $configPath"
 
 # --- Scheduled Task ---
 if ($createTask) {
-    $taskName  = "CERTAMENT"
+    $taskName   = "CERTAMENT"
     $scriptPath = Join-Path $installPath "_MAINCertManager.ps1"
+    $psExe      = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $taskFile   = Join-Path $env:WINDIR "System32\Tasks\$taskName"
 
-    $action = New-ScheduledTaskAction `
-        -Execute "powershell.exe" `
-        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" `
-        -WorkingDirectory $installPath
+    # ---- Phase 1: Nuke any zombie task/folder from previous broken attempts ----
+    $needsCleanup = $false
 
-    $trigger   = New-ScheduledTaskTrigger -Daily -At $taskTime
-    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-    $settings  = New-ScheduledTaskSettingsSet `
-        -StartWhenAvailable -DontStopOnIdleEnd `
-        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-        -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
-
-    $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    if ($existing) {
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-        Write-Info "Task precedente rimosso."
+    # Try COM delete first
+    try {
+        $scheduler = New-Object -ComObject Schedule.Service
+        $scheduler.Connect()
+        $rootFolder = $scheduler.GetFolder("\")
+        try { $rootFolder.DeleteTask($taskName, 0) } catch { }
+        try { $rootFolder.DeleteFolder($taskName, 0) } catch { }
+    }
+    catch { }
+    finally {
+        if ($scheduler) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($scheduler) | Out-Null; $scheduler = $null }
     }
 
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
-        -Principal $principal -Settings $settings `
-        -Description "CERTAMENT - Gestione automatica certificati Business Central" | Out-Null
+    # If filesystem artifact still exists, stop service, nuke, restart
+    if (Test-Path $taskFile) {
+        $needsCleanup = $true
+        Write-Info "Pulizia artefatti task corrotti..."
+        try {
+            Stop-Service -Name Schedule -Force -ErrorAction Stop
+            Start-Sleep -Seconds 2
+            Remove-Item -Path $taskFile -Recurse -Force -ErrorAction Stop
+            Write-Info "Artefatti rimossi."
+        }
+        catch {
+            Write-Warn "Pulizia file task fallita: $_"
+        }
+        finally {
+            Start-Service -Name Schedule -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+        }
+    }
 
-    Write-Ok "Scheduled Task '$taskName' registrato (ogni giorno alle $taskTime)."
+    # ---- Phase 2: Register via COM ----
+    $taskCreated = $false
+    try {
+        $scheduler = New-Object -ComObject Schedule.Service
+        $scheduler.Connect()
+        $rootFolder = $scheduler.GetFolder("\")
+
+        $taskDef = $scheduler.NewTask(0)
+        $taskDef.RegistrationInfo.Description = "CERTAMENT - Gestione automatica certificati Business Central"
+
+        $taskDef.Settings.Enabled                    = $true
+        $taskDef.Settings.StartWhenAvailable         = $true
+        $taskDef.Settings.StopIfGoingOnBatteries     = $false
+        $taskDef.Settings.DisallowStartIfOnBatteries = $false
+        $taskDef.Settings.ExecutionTimeLimit          = "PT30M"
+
+        $execAction = $taskDef.Actions.Create(0)
+        $execAction.Path             = $psExe
+        $execAction.Arguments        = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+        $execAction.WorkingDirectory = $installPath
+
+        $dailyTrigger = $taskDef.Triggers.Create(2)
+        $triggerDate   = [DateTime]::Today.Add([TimeSpan]::Parse($taskTime))
+        $dailyTrigger.StartBoundary = $triggerDate.ToString("yyyy-MM-ddTHH:mm:ss")
+        $dailyTrigger.DaysInterval  = 1
+        $dailyTrigger.Enabled       = $true
+
+        $rootFolder.RegisterTaskDefinition(
+            $taskName, $taskDef, 6, "SYSTEM", $null, 5
+        ) | Out-Null
+
+        $taskCreated = $true
+    }
+    catch {
+        Write-Warn "COM RegisterTaskDefinition fallito: $_"
+    }
+    finally {
+        if ($scheduler) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($scheduler) | Out-Null; $scheduler = $null }
+    }
+
+    # ---- Phase 3: Fallback with cmdlet if COM failed ----
+    if (-not $taskCreated) {
+        Write-Info "Tentativo con Register-ScheduledTask..."
+        try {
+            $action    = New-ScheduledTaskAction -Execute $psExe `
+                            -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" `
+                            -WorkingDirectory $installPath
+            $trigger   = New-ScheduledTaskTrigger -Daily -At $taskTime
+            $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+            $settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopOnIdleEnd `
+                            -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                            -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+
+            Register-ScheduledTask -TaskName $taskName `
+                -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
+                -Description "CERTAMENT - Gestione automatica certificati Business Central" `
+                -ErrorAction Stop | Out-Null
+
+            $taskCreated = $true
+        }
+        catch {
+            Write-Warn "Register-ScheduledTask fallito: $_"
+        }
+    }
+
+    # ---- Phase 4: Verify or show manual instructions ----
+    if ($taskCreated) {
+        $verify = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($verify) {
+            Write-Ok "Scheduled Task '$taskName' registrato (powershell.exe, ogni giorno alle $taskTime)."
+        }
+        else {
+            Write-Warn "Registrazione completata ma la task non appare. Verificare in Task Scheduler (F5 per refresh)."
+        }
+    }
+    else {
+        Write-Err "Impossibile registrare lo Scheduled Task automaticamente."
+        Write-Warn "Registrare manualmente da un PowerShell elevato:"
+        Write-Host ""
+        Write-Host "      `$action    = New-ScheduledTaskAction -Execute '$psExe' -Argument '-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"' -WorkingDirectory '$installPath'" -ForegroundColor DarkYellow
+        Write-Host "      `$trigger   = New-ScheduledTaskTrigger -Daily -At '$taskTime'" -ForegroundColor DarkYellow
+        Write-Host "      `$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest" -ForegroundColor DarkYellow
+        Write-Host "      Register-ScheduledTask -TaskName '$taskName' -Action `$action -Trigger `$trigger -Principal `$principal" -ForegroundColor DarkYellow
+        Write-Host ""
+    }
 }
 
 # ============================================================
 # DONE
 # ============================================================
 Write-Host ""
-Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "  ║          Installazione completata!                  ║" -ForegroundColor Green
-Write-Host "  ╚══════════════════════════════════════════════════════╝" -ForegroundColor Green
+    Write-Host "  +======================================================+" -ForegroundColor Green
+    Write-Host "  |          Installazione completata!                  |" -ForegroundColor Green
+    Write-Host "  +======================================================+" -ForegroundColor Green
 Write-Host ""
 Write-Info "Percorso: $installPath"
 Write-Info "Per eseguire manualmente:"
@@ -282,3 +385,7 @@ Write-Host "      powershell -File `"$(Join-Path $installPath '_MAINCertManager.
 Write-Host ""
 Write-Info "Ricordarsi di copiare il file .pfx in: $pfxPath"
 Write-Host ""
+
+if ($WaitAtEnd) {
+    Read-Host "Premi Invio per chiudere"
+}

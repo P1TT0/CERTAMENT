@@ -34,7 +34,14 @@ $config = Get-Content -Raw -Path $configPath | ConvertFrom-Json
 # ============================================================
 # Logging
 # ============================================================
-$logDir = Join-Path $PSScriptRoot ($config.Logging.Path ?? "logs")
+$logPath = if ($config.Logging -and -not [string]::IsNullOrWhiteSpace([string]$config.Logging.Path)) {
+    [string]$config.Logging.Path
+}
+else {
+    "logs"
+}
+
+$logDir = Join-Path $PSScriptRoot $logPath
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
 $logFile = Join-Path $logDir ("certament_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
@@ -125,8 +132,24 @@ function Main {
     $webhooks = Get-WebhookTable
     $hostname = $env:COMPUTERNAME
     $pfxPath = $config.Pfx.Path
-    $expiryThreshold = [int]($config.Notifications.CertificateExpiry.NotifyBeforeDays ?? 30)
-    $iisSiteName = $config.IIS.SiteName ?? "Microsoft Dynamics 365 Business Central Web Client"
+    $notifyBeforeDaysRaw = $null
+    if ($config.Notifications -and $config.Notifications.CertificateExpiry) {
+        $notifyBeforeDaysRaw = $config.Notifications.CertificateExpiry.NotifyBeforeDays
+    }
+
+    if ($null -ne $notifyBeforeDaysRaw -and -not [string]::IsNullOrWhiteSpace([string]$notifyBeforeDaysRaw)) {
+        $expiryThreshold = [int]$notifyBeforeDaysRaw
+    }
+    else {
+        $expiryThreshold = 30
+    }
+
+    if ($config.IIS -and -not [string]::IsNullOrWhiteSpace([string]$config.IIS.SiteName)) {
+        $iisSiteName = [string]$config.IIS.SiteName
+    }
+    else {
+        $iisSiteName = "Microsoft Dynamics 365 Business Central Web Client"
+    }
     $iisRestart = $config.IIS.RestartAfterUpdate -ne $false
 
     # ----------------------------------------------------------
