@@ -1,0 +1,26 @@
+{
+  "Pfx": {
+    "Path": "C:\\_install",
+    "Password": "<SET_ME>",
+    "AutoSelectLatest": true
+  },
+  "BusinessCentral": {
+    "UseLatestModule": true
+  },
+  "Notifications": {
+    "EnableEmail": false,
+    "SmtpServer": "smtp.mycompany.local",
+    "Port": 587,
+    "Sender": "alerts@mycompany.local",
+    "Recipient": "admin@mycompany.local",
+    "EnableWebhook": true,
+    "Webhooks": {
+      "Customer": "<SET_CUSTOMER_WEBHOOK_URL>",
+      "Internal": "<SET_INTERNAL_WEBHOOK_URL>"
+    },
+    "CertificateExpiry": {
+      "NotifyBeforeDays": 365,
+      "EnableCustomerNotification": true
+    }
+  }
+}

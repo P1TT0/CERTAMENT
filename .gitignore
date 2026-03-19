@@ -1,0 +1,22 @@
+# Local secrets and machine-specific config
+config.json
+
+# Certificate/private key artifacts
+*.pfx
+*.p12
+*.pem
+*.key
+*.cer
+*.crt
+*.der
+*.p7b
+*.p7c
+
+# Backup/generated artifacts
+*.bak
+*.log
+
+# Editor/OS noise
+.vscode/
+Thumbs.db
+.DS_Store
