@@ -1,18 +1,22 @@
 {
   "Pfx": {
     "Path": "C:\\_install",
-    "Password": "<SET_ME>",
+    "Password": "<SET_PFX_PASSWORD>",
     "AutoSelectLatest": true
   },
   "BusinessCentral": {
     "UseLatestModule": true
   },
+  "IIS": {
+    "SiteName": "Microsoft Dynamics 365 Business Central Web Client",
+    "RestartAfterUpdate": true
+  },
+  "Logging": {
+    "Enabled": true,
+    "Path": "logs",
+    "RetentionDays": 90
+  },
   "Notifications": {
-    "EnableEmail": false,
-    "SmtpServer": "smtp.mycompany.local",
-    "Port": 587,
-    "Sender": "alerts@mycompany.local",
-    "Recipient": "admin@mycompany.local",
     "EnableWebhook": true,
     "Webhooks": {
       "Customer": "<SET_CUSTOMER_WEBHOOK_URL>",

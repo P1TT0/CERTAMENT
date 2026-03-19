@@ -1,7 +1,7 @@
-# Local secrets and machine-specific config
+# Runtime config (contains passwords/webhook URLs)
 config.json
 
-# Certificate/private key artifacts
+# Certificate / private key files
 *.pfx
 *.p12
 *.pem
@@ -12,11 +12,24 @@ config.json
 *.p7b
 *.p7c
 
-# Backup/generated artifacts
+# Backup artifacts
 *.bak
-*.log
 
-# Editor/OS noise
+# Logs (kept locally, not in source)
+logs/
+
+# Editor / OS noise
 .vscode/
 Thumbs.db
 .DS_Store
+
+# Legacy files (pre-refactor)
+TEST.ps1
+SENDMAILPROVA.ps1
+test.designer.ps1
+clean_text.ps1
+Get-PfxDetails.psm1
+.clean_comments_emojis_safe.ps1
+.diag_parse_three.ps1
+.remove_comments_emojis.ps1
+.restore_from_bak.ps1
