@@ -1,7 +1,7 @@
 {
   "Pfx": {
     "Path": "C:\\_install",
-    "Password": "<SET_PFX_PASSWORD>",
+    "Password": "",
     "AutoSelectLatest": true
   },
   "BusinessCentral": {

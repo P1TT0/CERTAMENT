@@ -202,7 +202,18 @@ function Invoke-Diagnostics {
             $cfg = Get-Content -Raw $cfgPath | ConvertFrom-Json
             Write-DiagCheck -Result $true -Label "config.json e JSON valido"
             Write-DiagCheck -Result ($cfg.Pfx.Path     -and $cfg.Pfx.Path.Trim()     -ne "") -Label "config.json: Pfx.Path configurato"
-            Write-DiagCheck -Result ($cfg.Pfx.Password -and $cfg.Pfx.Password.Trim() -ne "") -Label "config.json: Pfx.Password configurato"
+            $hasConfigPwd = ($cfg.Pfx.Password -and $cfg.Pfx.Password.Trim() -ne "")
+            $hasPwdTxt = $false
+            if ($cfg.Pfx.Path -and (Test-Path $cfg.Pfx.Path)) {
+                $hasPwdTxt = Test-Path (Join-Path $cfg.Pfx.Path "password.txt")
+            }
+            if ($hasPwdTxt) {
+                Write-DiagCheck -Result $true -Label "password.txt presente in $($cfg.Pfx.Path)"
+            } elseif ($hasConfigPwd) {
+                Write-DiagCheck -Result $true -Label "Pfx.Password fallback nel config"
+            } else {
+                Write-DiagCheck -AsWarn -Result $false -Label "Password PFX" -Detail "Nessun password.txt e nessun fallback nel config"
+            }
             $iisSiteConfigured = ($cfg.IIS -and $cfg.IIS.SiteName -and $cfg.IIS.SiteName.Trim() -ne "")
             Write-DiagCheck -AsWarn -Result $iisSiteConfigured -Label "config.json: IIS.SiteName configurato"
 
@@ -530,8 +541,10 @@ function Invoke-Install {
     Write-Info "CERTAMENT cerchera il .pfx piu recente in questa cartella."
     $pfxPath = Read-Value -Prompt "Cartella PFX" -Default "C:\_install"
 
-    Write-Info "Password del file PFX (usata per aprirlo)."
-    $pfxPassword = Read-SecureValue -Prompt "Password PFX"
+    Write-Info "Password PFX: il cliente puo creare un file 'password.txt' nella cartella PFX."
+    Write-Info "CERTAMENT lo leggera e lo eliminera dopo l'uso."
+    Write-Info "In alternativa, inserire una password di fallback qui (oppure lasciare vuoto)."
+    $pfxPassword = Read-Value -Prompt "Password PFX fallback (opzionale)" -Default "" -AllowEmpty
 
     # ---------- Step 3: IIS ----------
     Write-Step 3 6 "Configurazione IIS"
@@ -589,6 +602,7 @@ function Invoke-Install {
     Write-Host "  +-----------------------------------------------------+" -ForegroundColor White
     Write-Host ("  |  Percorso installazione : {0}" -f $installPath.PadRight(27)) -ForegroundColor White
     Write-Host ("  |  Cartella PFX           : {0}" -f $pfxPath.PadRight(27)) -ForegroundColor White
+    Write-Host ("  |  Password PFX           : {0}" -f ($(if ($pfxPassword) {"Fallback nel config"} else {"Solo password.txt"}).PadRight(27))) -ForegroundColor White
     Write-Host ("  |  Sito IIS               : {0}" -f ($iisSiteName.Substring(0, [Math]::Min(27, $iisSiteName.Length))).PadRight(27)) -ForegroundColor White
     Write-Host ("  |  Riavvio IIS            : {0}" -f ($(if ($iisRestart) {"Si"} else {"No"}).PadRight(27))) -ForegroundColor White
     Write-Host ("  |  Webhook Customer       : {0}" -f ($(if ($webhookCustomer) {"Configurato"} else {"Disabilitato"}).PadRight(27))) -ForegroundColor White

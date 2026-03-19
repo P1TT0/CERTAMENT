@@ -346,8 +346,33 @@ function Main {
 
     # Case 2: Read PFX
     Write-Host "[4/7] PFX trovato: $pfxFile. Lettura..."
+
+    # --- Resolve PFX password: password.txt > config fallback ---
+    $pfxPasswordPlain = $null
+    $passwordFile = Join-Path $pfxPath "password.txt"
+    if (Test-Path $passwordFile) {
+        $pfxPasswordPlain = (Get-Content -Path $passwordFile -Raw -ErrorAction Stop).Trim()
+        Write-Host "Password letta da: $passwordFile"
+    }
+    elseif ($config.Pfx.Password -and $config.Pfx.Password.Trim() -ne "") {
+        $pfxPasswordPlain = $config.Pfx.Password
+        Write-Host "Password da config.json (fallback)"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($pfxPasswordPlain)) {
+        Write-Warning "Nessuna password PFX disponibile. Creare password.txt in $pfxPath"
+        if ($webhooks.Count) {
+            Send-Notification -Title "CERTAMENT - Password PFX mancante" `
+                -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni**.`nE' stato trovato un PFX ma manca la password.`nCreare il file **password.txt** in **$pfxPath** con la password del PFX.") `
+                -Target "Customer" -Webhooks $webhooks
+        }
+        Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxNoPassword" -Detail "Nessuna password PFX disponibile" | Out-Null
+        Stop-Transcript | Out-Null
+        return
+    }
+
     try {
-        $pfxPassword = ConvertTo-SecureString $config.Pfx.Password -AsPlainText -Force
+        $pfxPassword = ConvertTo-SecureString $pfxPasswordPlain -AsPlainText -Force
         $pfxData = Get-PfxData -FilePath $pfxFile -Password $pfxPassword
         $pfxExpiry = $pfxData.EndEntityCertificates.NotAfter
         $pfxThumb = $pfxData.EndEntityCertificates.Thumbprint
@@ -356,7 +381,7 @@ function Main {
         Write-Warning "Errore lettura PFX: $($_.Exception.Message)"
         if ($webhooks.Count) {
             Send-Notification -Title "CERTAMENT - Certificato in scadenza" `
-                -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni** ma il PFX non e' leggibile.`nCaricare un nuovo PFX su **$hostname** in: **$pfxPath**") `
+                -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni** ma il PFX non e' leggibile.`nVerificare che la password sia corretta.`nCaricare un nuovo PFX su **$hostname** in: **$pfxPath**") `
                 -Target "Customer" -Webhooks $webhooks
         }
         Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxUnreadable" -Detail $_.Exception.Message | Out-Null
@@ -435,6 +460,22 @@ Servizi BC e IIS aggiornati.
         Send-Notification -Title "CERTAMENT - Certificato aggiornato" -Message $msg -Target "Internal" -Webhooks $webhooks
     }
 
+    # --- Post-pipeline cleanup: delete password.txt and archive PFX ---
+    if (Test-Path $passwordFile) {
+        Remove-Item -Path $passwordFile -Force -ErrorAction SilentlyContinue
+        Write-Host "File password.txt eliminato."
+    }
+
+    $installedDir = Join-Path $pfxPath "installed"
+    if (-not (Test-Path $installedDir)) { New-Item -ItemType Directory -Path $installedDir -Force | Out-Null }
+    try {
+        Move-Item -Path $pfxFile -Destination $installedDir -Force
+        Write-Host "PFX archiviato in: $installedDir"
+    }
+    catch {
+        Write-Warning "Impossibile archiviare PFX: $($_.Exception.Message)"
+    }
+
     if ($hadPipelineErrors) {
         Invoke-Heartbeat -Status "CompletedWithWarnings" -Stage "MainEnd" -Detail "Pipeline completata con warning/errori parziali" | Out-Null
     }
@@ -454,5 +495,5 @@ catch {
     try { Send-FailureNotification -Context "Errore critico" -ErrorDetail $_.Exception.Message } catch {}
 }
 finally {
-    Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
+    try { Stop-Transcript | Out-Null } catch {}
 }
