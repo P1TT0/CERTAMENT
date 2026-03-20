@@ -21,6 +21,7 @@ function Get-CertDetails {
             NotBefore        = $cert.NotBefore
             NotAfter         = $cert.NotAfter
             DaysRemaining    = (New-TimeSpan -Start (Get-Date) -End $cert.NotAfter).Days
+            IsExpired        = ($cert.NotAfter -lt (Get-Date))
             ExpiringSoon     = ((New-TimeSpan -Start (Get-Date) -End $cert.NotAfter).Days -le $WarningDays)
             EnhancedKeyUsage = ($cert.EnhancedKeyUsageList | ForEach-Object { $_.FriendlyName }) -join ', '
             DnsNames         = ($cert.DnsNameList | ForEach-Object { $_.Unicode }) -join ', '

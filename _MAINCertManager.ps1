@@ -535,11 +535,16 @@ function Main {
 
     $currentExpiry = $certDetails.NotAfter
     $daysLeft = [math]::Floor(($currentExpiry - (Get-Date)).TotalDays)
-    if ($daysLeft -lt 0) { $daysLeft = 0 }
+    $certAlreadyExpired = $daysLeft -lt 0
+    if ($certAlreadyExpired) { $daysLeft = 0 }
 
     Write-Host "Certificato: $($certDetails.Subject)"
     Write-Host "Thumbprint:  $($certDetails.Thumbprint)"
-    Write-Host "Scadenza:    $currentExpiry ($daysLeft giorni rimanenti)"
+    if ($certAlreadyExpired) {
+        Write-Warning "Scadenza:    $currentExpiry (GIA' SCADUTO)"
+    } else {
+        Write-Host "Scadenza:    $currentExpiry ($daysLeft giorni rimanenti)"
+    }
 
     # ----------------------------------------------------------
     # Step 3: Check expiry threshold
@@ -551,7 +556,8 @@ function Main {
         return
     }
 
-    Write-Host "`n[3/7] Certificato in scadenza ($daysLeft giorni). Verifica PFX..."
+    $expiryLabel = if ($certAlreadyExpired) { "GIA' SCADUTO" } else { "in scadenza ($daysLeft giorni)" }
+    Write-Host "`n[3/7] Certificato $expiryLabel. Verifica PFX..."
 
     # ----------------------------------------------------------
     # Step 4: Find PFX
@@ -610,12 +616,23 @@ function Main {
         return
     }
 
-    # Case 3: PFX not newer
+    # Case 3a: PFX cert already expired
+    if ($pfxExpiry -lt (Get-Date)) {
+        Write-Warning "Il PFX contiene un certificato gia' scaduto ($pfxExpiry). Non verra' installato."
+        $null = Send-CustomerNotification -Title "CERTAMENT - PFX scaduto" `
+            -Message ("Il certificato **$($certDetails.Subject)** e' $expiryLabel.`nIl PFX trovato in **$pfxPath** contiene a sua volta un certificato **gia' scaduto** ($pfxExpiry).`nCaricare un PFX con un certificato valido.") `
+            -ContextLabel "Certificato scaduto - PFX scaduto"
+        Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxExpired" -Detail "PFX trovato ma certificato gia' scaduto: $pfxExpiry" | Out-Null
+        Stop-Transcript | Out-Null
+        return
+    }
+
+    # Case 3b: PFX not newer
     if ($pfxExpiry -le $currentExpiry -or $pfxThumb -eq $certDetails.Thumbprint) {
         Write-Warning "Il PFX non e' piu recente del certificato attuale."
         $null = Send-CustomerNotification -Title "CERTAMENT - PFX non aggiornato" `
-            -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni**.`nIl PFX presente in **$pfxPath** non contiene un certificato piu recente.`nCaricare un nuovo PFX aggiornato.") `
-            -ContextLabel "Certificato in scadenza - PFX non aggiornato"
+            -Message ("Il certificato **$($certDetails.Subject)** e' $expiryLabel.`nIl PFX presente in **$pfxPath** non contiene un certificato piu recente.`nCaricare un nuovo PFX aggiornato.") `
+            -ContextLabel "Certificato scaduto - PFX non aggiornato"
         Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxNotNewer" -Detail "PFX presente ma non piu recente del certificato attuale" | Out-Null
         Stop-Transcript | Out-Null
         return

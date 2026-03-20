@@ -14,12 +14,17 @@
 
 .EXAMPLE
     .\Set-CertamentCertificate.ps1 -SelectionIndex 2
+
+.EXAMPLE
+    # Forza installazione anche se il certificato e' scaduto (solo per test)
+    .\Set-CertamentCertificate.ps1 -AllowExpired
 #>
 param(
     [string]$InstallRoot = (Split-Path -Parent $PSScriptRoot),
     [int]$SelectionIndex = 0,
     [switch]$ListOnly,
     [switch]$SkipWebServiceCheck,
+    [switch]$AllowExpired,
     [int]$MaxWaitSec = 300
 )
 
@@ -387,6 +392,18 @@ Write-Host 'Certificato selezionato:' -ForegroundColor Cyan
 Write-Host ("  Subject    : {0}" -f $selected.Subject)
 Write-Host ("  Thumbprint : {0}" -f $selected.Thumbprint)
 Write-Host ("  Scadenza   : {0}" -f $selected.NotAfter.ToString('yyyy-MM-dd HH:mm:ss'))
+
+# Block expired cert unless -AllowExpired is explicitly passed
+if ($selected.NotAfter -lt (Get-Date)) {
+    Write-Host ''
+    Write-Host '!! ATTENZIONE: Il certificato selezionato e'' GIA'' SCADUTO !!' -ForegroundColor Red
+    Write-Host ("   Scaduto il: {0}" -f $selected.NotAfter.ToString('yyyy-MM-dd HH:mm:ss')) -ForegroundColor Red
+    if (-not $AllowExpired.IsPresent) {
+        Write-Host '   Operazione bloccata. Usare -AllowExpired per forzare (solo per test).' -ForegroundColor Red
+        return
+    }
+    Write-Warning 'Flag -AllowExpired presente. Procedura forzata nonostante certificato scaduto.'
+}
 
 $confirm = Read-Host 'Confermi applicazione a BC + IIS? [S/N]'
 if ($confirm.Trim().ToUpper() -notin @('S', 'SI', 'Y', 'YES')) {

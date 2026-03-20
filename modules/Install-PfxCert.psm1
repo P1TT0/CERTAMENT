@@ -27,6 +27,9 @@ function Install-PfxCert {
             $check = Get-ChildItem Cert:\LocalMachine\My | Where-Object Thumbprint -eq $cert.Thumbprint
             if ($check) {
                 Write-Host "Verifica post-installazione riuscita."
+                if ($cert.NotAfter -lt (Get-Date)) {
+                    Write-Warning "ATTENZIONE: Il certificato installato e' gia' scaduto ($($cert.NotAfter))."
+                }
                 return $cert
             }
             else {
