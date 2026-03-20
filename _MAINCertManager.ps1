@@ -131,6 +131,34 @@ $moduleDir = Join-Path $PSScriptRoot "modules"
 $script:HeartbeatFailureNotified = $false
 
 # ============================================================
+# Helper: customer context
+# ============================================================
+function Get-CustomerName {
+    if ($config.Context -and -not [string]::IsNullOrWhiteSpace([string]$config.Context.CustomerName)) {
+        return [string]$config.Context.CustomerName.Trim()
+    }
+    return $null
+}
+
+$script:CustomerName = Get-CustomerName
+
+function Get-CustomerLabel {
+    if ([string]::IsNullOrWhiteSpace([string]$script:CustomerName)) {
+        return "Cliente non specificato"
+    }
+    return [string]$script:CustomerName
+}
+
+function Get-CertamentTitle {
+    param([string]$BaseTitle)
+
+    if ([string]::IsNullOrWhiteSpace([string]$script:CustomerName)) {
+        return $BaseTitle
+    }
+    return ("{0} [{1}]" -f $BaseTitle, $script:CustomerName)
+}
+
+# ============================================================
 # Helper: build webhook hashtable from config
 # ============================================================
 function Get-WebhookTable {
@@ -138,6 +166,71 @@ function Get-WebhookTable {
     if ($config.Notifications.Webhooks.Customer) { $wh['Customer'] = $config.Notifications.Webhooks.Customer }
     if ($config.Notifications.Webhooks.Internal) { $wh['Internal'] = $config.Notifications.Webhooks.Internal }
     return $wh
+}
+
+# ============================================================
+# Helper: send internal notification
+# ============================================================
+function Send-InternalNotification {
+    param(
+        [string]$Title,
+        [string]$Message
+    )
+
+    $webhooks = Get-WebhookTable
+    if (-not $webhooks.ContainsKey('Internal')) {
+        Write-Warning "Webhook Internal non configurato. Notifica interna non inviata."
+        return $false
+    }
+
+    $fullTitle = Get-CertamentTitle -BaseTitle $Title
+    return (Send-Notification -Title $fullTitle -Message $Message -Target "Internal" -Webhooks $webhooks)
+}
+
+# ============================================================
+# Helper: send customer notification with fallback on failure
+# ============================================================
+function Send-CustomerNotification {
+    param(
+        [string]$Title,
+        [string]$Message,
+        [string]$ContextLabel = ""
+    )
+
+    $webhooks = Get-WebhookTable
+    $fullTitle = Get-CertamentTitle -BaseTitle $Title
+
+    if (-not $webhooks.ContainsKey('Customer')) {
+        $detail = if ([string]::IsNullOrWhiteSpace($ContextLabel)) { "Webhook Customer non configurato" } else { $ContextLabel }
+        Write-Warning "Webhook Customer non configurato."
+        Invoke-Heartbeat -Status "NotificationFailed" -Stage "CustomerNotificationMissing" -Detail $detail | Out-Null
+
+        $fallbackMsg = @"
+Invio notifica CUSTOMER non possibile su server **$env:COMPUTERNAME**.
+
+**Cliente:** $(Get-CustomerLabel)
+**Contesto:** $detail
+**Motivo:** Webhook Customer non configurato.
+"@
+        $null = Send-InternalNotification -Title "CERTAMENT - Alert notifica Customer fallita" -Message $fallbackMsg
+        return $false
+    }
+
+    $sent = Send-Notification -Title $fullTitle -Message $Message -Target "Customer" -Webhooks $webhooks
+    if ($sent) { return $true }
+
+    $failDetail = if ([string]::IsNullOrWhiteSpace($ContextLabel)) { "Invio notifica Customer fallito" } else { $ContextLabel }
+    Invoke-Heartbeat -Status "NotificationFailed" -Stage "CustomerNotification" -Detail $failDetail | Out-Null
+
+    $fallbackMsg = @"
+Invio notifica CUSTOMER fallito su server **$env:COMPUTERNAME**.
+
+**Cliente:** $(Get-CustomerLabel)
+**Contesto:** $failDetail
+**Azione:** verificare webhook Customer / flow Power Automate.
+"@
+    $null = Send-InternalNotification -Title "CERTAMENT - Alert notifica Customer fallita" -Message $fallbackMsg
+    return $false
 }
 
 # ============================================================
@@ -153,11 +246,12 @@ function Send-FailureNotification {
     $msg = @"
 Si e' verificato un errore durante l'esecuzione di CERTAMENT sul server **$hostname**.
 
+**Cliente:** $(Get-CustomerLabel)
 **Contesto:** $Context
 **Errore:** $ErrorDetail
 "@
 
-    Send-Notification -Title "CERTAMENT - Errore" -Message $msg -Target "Internal" -Webhooks $webhooks
+    $null = Send-InternalNotification -Title "CERTAMENT - Errore" -Message $msg
 }
 
 # ============================================================
@@ -218,6 +312,7 @@ function Invoke-Heartbeat {
 
     $payload = @{
         tool      = "CERTAMENT"
+        customer  = (Get-CustomerLabel)
         server    = $env:COMPUTERNAME
         status    = $Status
         stage     = $Stage
@@ -248,14 +343,146 @@ function Invoke-Heartbeat {
 }
 
 # ============================================================
+# Helper: wait for web services with polling
+# ============================================================
+function Wait-ForWebServices {
+    param(
+        [int]$MaxWaitSec = 600,
+        [int]$IntervalSec = 30,
+        [string]$ExpectedThumbprint = ''
+    )
+
+    $deadline = (Get-Date).AddSeconds($MaxWaitSec)
+    $attempt = 0
+    $wsParams = @{ TimeoutSec = 15 }
+    if ($ExpectedThumbprint) { $wsParams['ExpectedThumbprint'] = $ExpectedThumbprint }
+
+    while ((Get-Date) -lt $deadline) {
+        $attempt++
+        Write-Host ("  Attesa servizi web (tentativo {0}, max {1}s)..." -f $attempt, $MaxWaitSec)
+        $results = Test-BCWebServices @wsParams
+        if ($results) {
+            $errors = @($results | Where-Object { $_.Status -eq 'ERROR' })
+            $sslMismatches = @($results | Where-Object { $_.SslMatch -eq $false })
+            if ($errors.Count -eq 0 -and $sslMismatches.Count -eq 0) {
+                Write-Host "  Servizi web tutti operativi, SSL verificato."
+                return $results
+            }
+            if ($errors.Count -gt 0) {
+                $errSummary = ($errors | ForEach-Object { "$($_.Instance): $($_.Error)" }) -join '; '
+                Write-Host "  Servizi non ancora pronti: $errSummary"
+            }
+            if ($sslMismatches.Count -gt 0) {
+                $sslSummary = ($sslMismatches | ForEach-Object { "$($_.Instance): SSL $($_.SslThumbprint)" }) -join '; '
+                Write-Host "  SSL mismatch: $sslSummary"
+            }
+        }
+        else {
+            Write-Host "  Test-BCWebServices non ha restituito risultati."
+        }
+        if ((Get-Date).AddSeconds($IntervalSec) -ge $deadline) { break }
+        Start-Sleep -Seconds $IntervalSec
+    }
+    Write-Warning "Timeout ($MaxWaitSec s): alcuni servizi non rispondono."
+    return $results
+}
+
+# ============================================================
+# Helper: verify BC post-update (thumbprint + Running state)
+# ============================================================
+function Test-BCPostUpdate {
+    param([string]$ExpectedThumbprint)
+
+    $expectedNorm = ($ExpectedThumbprint -replace '\s', '').ToUpper()
+    $errors = @()
+
+    try {
+        $instances = Get-NAVServerInstance -ErrorAction Stop
+    }
+    catch {
+        return @("Impossibile enumerare istanze BC: $($_.Exception.Message)")
+    }
+
+    foreach ($inst in $instances) {
+        $name = $inst.ServerInstance
+        $hasThumb = $false
+
+        try {
+            $thumb = Get-NAVServerConfiguration -ServerInstance $name -KeyName "ServicesCertificateThumbprint" -ErrorAction Stop
+            if ($thumb -and $thumb.Trim() -ne "") {
+                $hasThumb = $true
+                $thumbNorm = ($thumb -replace '\s', '').ToUpper()
+                if ($thumbNorm -ne $expectedNorm) {
+                    $errors += "$name : thumbprint $thumbNorm (atteso $expectedNorm)"
+                }
+            }
+        }
+        catch {
+            $errors += "$name : errore lettura thumbprint - $($_.Exception.Message)"
+        }
+
+        # Controlla Running solo per istanze con thumbprint configurato
+        if ($hasThumb -and $inst.State -and $inst.State -ne 'Running') {
+            $errors += "$name : stato $($inst.State) (atteso Running)"
+        }
+    }
+
+    return $errors
+}
+
+# ============================================================
+# Helper: verify IIS binding post-update
+# ============================================================
+function Test-IISPostUpdate {
+    param(
+        [string]$ExpectedThumbprint,
+        [string]$SiteName = "Microsoft Dynamics 365 Business Central Web Client"
+    )
+
+    $expectedNorm = ($ExpectedThumbprint -replace '\s', '').ToUpper()
+    $errors = @()
+
+    try {
+        if (-not ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq "Microsoft.Web.Administration" })) {
+            $dllPath = "C:\Windows\System32\inetsrv\Microsoft.Web.Administration.dll"
+            if (Test-Path $dllPath) { [void][Reflection.Assembly]::LoadFrom($dllPath) }
+            else { return @("Microsoft.Web.Administration.dll non trovata") }
+        }
+
+        $sm = New-Object Microsoft.Web.Administration.ServerManager
+        $site = $sm.Sites[$SiteName]
+        if (-not $site) { return @("Sito '$SiteName' non trovato in IIS") }
+
+        foreach ($binding in $site.Bindings) {
+            if ($binding.Protocol -ne 'https') { continue }
+            $bindingInfo = $binding.BindingInformation
+            if ($binding.CertificateHash) {
+                $currentThumb = ([System.BitConverter]::ToString($binding.CertificateHash) -replace '-', '').ToUpper()
+                if ($currentThumb -ne $expectedNorm) {
+                    $errors += "Binding $bindingInfo : thumbprint $currentThumb (atteso $expectedNorm)"
+                }
+            }
+            else {
+                $errors += "Binding $bindingInfo : nessun certificato associato"
+            }
+        }
+    }
+    catch {
+        $errors += "Errore verifica IIS: $($_.Exception.Message)"
+    }
+
+    return $errors
+}
+
+# ============================================================
 # Main
 # ============================================================
 function Main {
     Write-Host ("=" * 60)
     Write-Host ("CERTAMENT - Avvio [{0}] su {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $env:COMPUTERNAME)
+    Write-Host ("Cliente: {0}" -f (Get-CustomerLabel))
     Write-Host ("=" * 60)
 
-    $webhooks = Get-WebhookTable
     $hostname = $env:COMPUTERNAME
     $pfxPath = $config.Pfx.Path
     $hadPipelineErrors = $false
@@ -334,11 +561,9 @@ function Main {
     # Case 1: No PFX found
     if ([string]::IsNullOrWhiteSpace($pfxFile)) {
         Write-Warning "Nessun file PFX trovato in $pfxPath"
-        if ($webhooks.Count) {
-            Send-Notification -Title "CERTAMENT - Certificato in scadenza" `
-                -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni**.`nCaricare un nuovo PFX sul server **$hostname** in: **$pfxPath**") `
-                -Target "Customer" -Webhooks $webhooks
-        }
+        $null = Send-CustomerNotification -Title "CERTAMENT - Certificato in scadenza" `
+            -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni**.`nCaricare un nuovo PFX sul server **$hostname** in: **$pfxPath**") `
+            -ContextLabel "Certificato in scadenza - PFX mancante"
         Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxMissing" -Detail "Nessun PFX trovato in $pfxPath" | Out-Null
         Stop-Transcript | Out-Null
         return
@@ -361,11 +586,9 @@ function Main {
 
     if ([string]::IsNullOrWhiteSpace($pfxPasswordPlain)) {
         Write-Warning "Nessuna password PFX disponibile. Creare password.txt in $pfxPath"
-        if ($webhooks.Count) {
-            Send-Notification -Title "CERTAMENT - Password PFX mancante" `
-                -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni**.`nE' stato trovato un PFX ma manca la password.`nCreare il file **password.txt** in **$pfxPath** con la password del PFX.") `
-                -Target "Customer" -Webhooks $webhooks
-        }
+        $null = Send-CustomerNotification -Title "CERTAMENT - Password PFX mancante" `
+            -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni**.`nE' stato trovato un PFX ma manca la password.`nCreare il file **password.txt** in **$pfxPath** con la password del PFX.") `
+            -ContextLabel "Certificato in scadenza - password PFX mancante"
         Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxNoPassword" -Detail "Nessuna password PFX disponibile" | Out-Null
         Stop-Transcript | Out-Null
         return
@@ -379,11 +602,9 @@ function Main {
     }
     catch {
         Write-Warning "Errore lettura PFX: $($_.Exception.Message)"
-        if ($webhooks.Count) {
-            Send-Notification -Title "CERTAMENT - Certificato in scadenza" `
-                -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni** ma il PFX non e' leggibile.`nVerificare che la password sia corretta.`nCaricare un nuovo PFX su **$hostname** in: **$pfxPath**") `
-                -Target "Customer" -Webhooks $webhooks
-        }
+        $null = Send-CustomerNotification -Title "CERTAMENT - Certificato in scadenza" `
+            -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni** ma il PFX non e' leggibile.`nVerificare che la password sia corretta.`nCaricare un nuovo PFX su **$hostname** in: **$pfxPath**") `
+            -ContextLabel "Certificato in scadenza - PFX non leggibile"
         Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxUnreadable" -Detail $_.Exception.Message | Out-Null
         Stop-Transcript | Out-Null
         return
@@ -392,11 +613,9 @@ function Main {
     # Case 3: PFX not newer
     if ($pfxExpiry -le $currentExpiry -or $pfxThumb -eq $certDetails.Thumbprint) {
         Write-Warning "Il PFX non e' piu recente del certificato attuale."
-        if ($webhooks.Count) {
-            Send-Notification -Title "CERTAMENT - PFX non aggiornato" `
-                -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni**.`nIl PFX presente in **$pfxPath** non contiene un certificato piu recente.`nCaricare un nuovo PFX aggiornato.") `
-                -Target "Customer" -Webhooks $webhooks
-        }
+        $null = Send-CustomerNotification -Title "CERTAMENT - PFX non aggiornato" `
+            -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni**.`nIl PFX presente in **$pfxPath** non contiene un certificato piu recente.`nCaricare un nuovo PFX aggiornato.") `
+            -ContextLabel "Certificato in scadenza - PFX non aggiornato"
         Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxNotNewer" -Detail "PFX presente ma non piu recente del certificato attuale" | Out-Null
         Stop-Transcript | Out-Null
         return
@@ -429,8 +648,32 @@ function Main {
         $hadPipelineErrors = $true
     }
 
+    # --- Post-BC verification with auto-remediation ---
+    Write-Host "`nVerifica post-aggiornamento BC (attesa avvio servizi)..."
+    Start-Sleep -Seconds 15
+    $bcVerifyErrors = Test-BCPostUpdate -ExpectedThumbprint $newThumb
+    if ($bcVerifyErrors) {
+        Write-Warning "Verifica BC fallita: $($bcVerifyErrors -join '; ')"
+        Write-Host "Retry aggiornamento BC..."
+        $bcRetry = Update-BCServiceCert -NewThumbprint $newThumb
+        if ($bcRetry) { $bcRetry | Format-Table -AutoSize }
+        Start-Sleep -Seconds 15
+        $bcVerifyErrors2 = Test-BCPostUpdate -ExpectedThumbprint $newThumb
+        if ($bcVerifyErrors2) {
+            $errDetail = $bcVerifyErrors2 -join "; "
+            Send-FailureNotification -Context "Verifica post-aggiornamento BC" -ErrorDetail "Fallita anche dopo retry: $errDetail"
+            $hadPipelineErrors = $true
+        }
+        else {
+            Write-Host "Remediation BC riuscita dopo retry."
+        }
+    }
+    else {
+        Write-Host "Verifica BC OK: thumbprint e stato Running confermati."
+    }
+
     # Update IIS
-    Write-Host "[7/7] Aggiornamento binding IIS..."
+    Write-Host "`n[7/7] Aggiornamento binding IIS..."
     try {
         $iisResults = Update-IISBinding -NewThumbprint $newThumb -SiteName $iisSiteName -RestartIIS:$iisRestart
         if ($iisResults) { $iisResults | Format-Table -AutoSize }
@@ -440,16 +683,60 @@ function Main {
         $hadPipelineErrors = $true
     }
 
-    # Smoke test
-    Write-Host "`nVerifica servizi web..."
-    $wsResults = Test-BCWebServices
+    # --- Post-IIS verification with auto-remediation ---
+    Write-Host "`nVerifica post-aggiornamento IIS..."
+    $iisVerifyErrors = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName
+    if ($iisVerifyErrors) {
+        Write-Warning "Verifica IIS fallita: $($iisVerifyErrors -join '; ')"
+        Write-Host "Retry aggiornamento IIS (con restart forzato)..."
+        try {
+            $iisRetry = Update-IISBinding -NewThumbprint $newThumb -SiteName $iisSiteName -RestartIIS
+            if ($iisRetry) { $iisRetry | Format-Table -AutoSize }
+        }
+        catch {
+            Write-Warning "Retry IIS fallito: $($_.Exception.Message)"
+        }
+        Start-Sleep -Seconds 10
+        $iisVerifyErrors2 = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName
+        if ($iisVerifyErrors2) {
+            $errDetail = $iisVerifyErrors2 -join "; "
+            Send-FailureNotification -Context "Verifica post-aggiornamento IIS" -ErrorDetail "Fallita anche dopo retry con restart: $errDetail"
+            $hadPipelineErrors = $true
+        }
+        else {
+            Write-Host "Remediation IIS riuscita dopo retry."
+        }
+    }
+    else {
+        Write-Host "Verifica IIS OK: binding aggiornati correttamente."
+    }
+
+    # Smoke test with polling + SSL verification (servizi possono metterci fino a 10 min)
+    Write-Host "`nAttesa servizi web post-aggiornamento (fino a 10 min)..."
+    $wsResults = Wait-ForWebServices -MaxWaitSec 600 -IntervalSec 30 -ExpectedThumbprint $newThumb
     if ($wsResults) { $wsResults | Format-Table -AutoSize }
 
-    # Success notification
-    if ($webhooks.Count) {
-        $msg = @"
-Nuovo certificato installato su server **$hostname**.
+    $wsErrors = if ($wsResults) { @($wsResults | Where-Object { $_.Status -eq 'ERROR' }) } else { @() }
+    if ($wsErrors.Count -gt 0) {
+        $wsErrText = ($wsErrors | ForEach-Object { "$($_.Instance) [$($_.Url)]: $($_.Error)" }) -join "; "
+        Send-FailureNotification -Context "Verifica servizi web post-aggiornamento" -ErrorDetail $wsErrText
+        $hadPipelineErrors = $true
+    }
 
+    $sslMismatches = if ($wsResults) { @($wsResults | Where-Object { $_.SslMatch -eq $false }) } else { @() }
+    if ($sslMismatches.Count -gt 0) {
+        $sslErrText = ($sslMismatches | ForEach-Object { "$($_.Instance) [$($_.Url)]: SSL cert $($_.SslThumbprint) (atteso $newThumb)" }) -join "; "
+        Send-FailureNotification -Context "Verifica SSL post-aggiornamento" -ErrorDetail $sslErrText
+        $hadPipelineErrors = $true
+    }
+
+    # Pipeline completion notification
+    $statusLabel = if ($hadPipelineErrors) { "con warning" } else { "con successo" }
+    $notifTitle = if ($hadPipelineErrors) { "CERTAMENT - Certificato aggiornato (con warning)" } else { "CERTAMENT - Certificato aggiornato" }
+    $msg = @"
+Nuovo certificato installato $statusLabel su server **$hostname**.
+
+**Cliente:** $(Get-CustomerLabel)
 **Dettagli:**
 - Soggetto: $($installedCert.Subject)
 - Thumbprint: $newThumb
@@ -457,8 +744,10 @@ Nuovo certificato installato su server **$hostname**.
 
 Servizi BC e IIS aggiornati.
 "@
-        Send-Notification -Title "CERTAMENT - Certificato aggiornato" -Message $msg -Target "Internal" -Webhooks $webhooks
+    if ($hadPipelineErrors) {
+        $msg += "`n`n**Attenzione:** si sono verificati errori durante la pipeline. Verificare i log."
     }
+    $null = Send-InternalNotification -Title $notifTitle -Message $msg
 
     # --- Post-pipeline cleanup: delete password.txt and archive PFX ---
     if (Test-Path $passwordFile) {

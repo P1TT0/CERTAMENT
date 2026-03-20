@@ -214,6 +214,8 @@ function Invoke-Diagnostics {
             } else {
                 Write-DiagCheck -AsWarn -Result $false -Label "Password PFX" -Detail "Nessun password.txt e nessun fallback nel config"
             }
+            $customerNameConfigured = ($cfg.Context -and $cfg.Context.CustomerName -and $cfg.Context.CustomerName.Trim() -ne "")
+            Write-DiagCheck -AsWarn -Result $customerNameConfigured -Label "config.json: Context.CustomerName configurato"
             $iisSiteConfigured = ($cfg.IIS -and $cfg.IIS.SiteName -and $cfg.IIS.SiteName.Trim() -ne "")
             Write-DiagCheck -AsWarn -Result $iisSiteConfigured -Label "config.json: IIS.SiteName configurato"
 
@@ -227,6 +229,10 @@ function Invoke-Diagnostics {
             }
             Write-DiagCheck -AsWarn -Result $webhookTable.ContainsKey('Internal') -Label "config.json: webhook Internal configurato"
             Write-DiagCheck -AsWarn -Result $webhookTable.ContainsKey('Customer') -Label "config.json: webhook Customer configurato"
+            if ($webhookTable.ContainsKey('Internal') -and $webhookTable.ContainsKey('Customer')) {
+                $sameWebhook = ([string]$webhookTable['Internal'] -eq [string]$webhookTable['Customer'])
+                Write-DiagCheck -AsWarn -Result (-not $sameWebhook) -Label "Webhook Customer/Internal separati"
+            }
 
             if ($cfg.Heartbeat) {
                 $heartbeatEnabled = ($cfg.Heartbeat.Enabled -eq $true)
@@ -324,6 +330,7 @@ function Invoke-Diagnostics {
     if ($heartbeatEnabled -and -not [string]::IsNullOrWhiteSpace($heartbeatUrl)) {
         $hbPayload = @{
             tool      = "CERTAMENT"
+            customer  = if ($cfg.Context -and $cfg.Context.CustomerName) { [string]$cfg.Context.CustomerName } else { "" }
             server    = $env:COMPUTERNAME
             status    = "Diagnostics"
             stage     = "Install-Certament"
@@ -534,6 +541,8 @@ function Invoke-Install {
     Write-Step 1 6 "Percorso di installazione"
     Write-Info "Dove installare CERTAMENT su questo server?"
     $installPath = Read-Value -Prompt "Percorso" -Default "C:\CERTAMENT"
+    Write-Info "Nome cliente (tag usato in notifiche e heartbeat)."
+    $customerName = Read-Value -Prompt "Nome cliente" -Default $env:COMPUTERNAME
 
     # ---------- Step 2: PFX drop folder ----------
     Write-Step 2 6 "Cartella PFX"
@@ -601,6 +610,7 @@ function Invoke-Install {
 
     Write-Host "  +-----------------------------------------------------+" -ForegroundColor White
     Write-Host ("  |  Percorso installazione : {0}" -f $installPath.PadRight(27)) -ForegroundColor White
+    Write-Host ("  |  Nome cliente           : {0}" -f ($customerName.Substring(0, [Math]::Min(27, $customerName.Length))).PadRight(27)) -ForegroundColor White
     Write-Host ("  |  Cartella PFX           : {0}" -f $pfxPath.PadRight(27)) -ForegroundColor White
     Write-Host ("  |  Password PFX           : {0}" -f ($(if ($pfxPassword) {"Fallback nel config"} else {"Solo password.txt"}).PadRight(27))) -ForegroundColor White
     Write-Host ("  |  Sito IIS               : {0}" -f ($iisSiteName.Substring(0, [Math]::Min(27, $iisSiteName.Length))).PadRight(27)) -ForegroundColor White
@@ -664,6 +674,9 @@ function Invoke-Install {
     $enableWebhook = ($webhookCustomer -ne "" -or $webhookInternal -ne "")
 
     $configObj = [ordered]@{
+        Context = [ordered]@{
+            CustomerName = $customerName
+        }
         Pfx = [ordered]@{
             Path             = $pfxPath
             Password         = $pfxPassword

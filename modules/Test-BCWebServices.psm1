@@ -1,7 +1,36 @@
+function Test-SslThumbprint {
+    [CmdletBinding()]
+    param([string]$Url)
+
+    try {
+        $uri = [System.Uri]$Url
+        if ($uri.Scheme -ne 'https') { return $null }
+        $hostname = $uri.Host
+        $port = if ($uri.Port -gt 0) { $uri.Port } else { 443 }
+
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $tcp.Connect($hostname, $port)
+        $ssl = New-Object System.Net.Security.SslStream(
+            $tcp.GetStream(), $false,
+            { param($s,$c,$ch,$e) return $true }
+        )
+        $ssl.AuthenticateAsClient($hostname)
+        $certHash = $ssl.RemoteCertificate.GetCertHash()
+        $thumb = ([System.BitConverter]::ToString($certHash) -replace '-', '').ToUpper()
+        $ssl.Dispose()
+        $tcp.Dispose()
+        return $thumb
+    }
+    catch {
+        return $null
+    }
+}
+
 function Test-BCWebServices {
     [CmdletBinding()]
     param (
-        [int]$TimeoutSec = 10
+        [int]$TimeoutSec = 10,
+        [string]$ExpectedThumbprint = ''
     )
 
     if (-not (Get-Command -Name Get-NAVServerInstance -ErrorAction SilentlyContinue)) {
@@ -29,10 +58,20 @@ function Test-BCWebServices {
         return $null
     }
 
+    $expectedNorm = if ($ExpectedThumbprint) { ($ExpectedThumbprint -replace '\s', '').ToUpper() } else { '' }
     $results = @()
 
     foreach ($inst in $instances) {
         $name = $inst.ServerInstance
+
+        # Skip istanze senza thumbprint configurato
+        $instThumb = $null
+        try { $instThumb = Get-NAVServerConfiguration -ServerInstance $name -KeyName "ServicesCertificateThumbprint" -ErrorAction SilentlyContinue } catch {}
+        if (-not $instThumb -or $instThumb.Trim() -eq '') {
+            Write-Host "  Skip $name (nessun thumbprint configurato)" -ForegroundColor Gray
+            continue
+        }
+
         Write-Host "  Test istanza: $name"
 
         $odataUrl = $null
@@ -55,14 +94,47 @@ function Test-BCWebServices {
 
         foreach ($url in $urls) {
             Write-Host "    Test: $url"
+
+            $uriObj = $null
+            $isValidUrl = [System.Uri]::TryCreate($url, [System.UriKind]::Absolute, [ref]$uriObj) -and `
+                ($uriObj.Scheme -eq 'http' -or $uriObj.Scheme -eq 'https')
+            if (-not $isValidUrl) {
+                Write-Warning "    URL non valido (skip): $url"
+                $results += [PSCustomObject]@{
+                    Instance      = $name
+                    Url           = $url
+                    Status        = "SKIPPED (Invalid URL)"
+                    Response      = $null
+                    Error         = $null
+                    SslThumbprint = $null
+                    SslMatch      = $null
+                }
+                continue
+            }
+
+            # SSL certificate verification
+            $sslThumb = Test-SslThumbprint -Url $url
+            $sslMatch = $null
+            if ($sslThumb -and $expectedNorm) {
+                $sslMatch = ($sslThumb -eq $expectedNorm)
+                $matchLabel = if ($sslMatch) { 'MATCH' } else { 'MISMATCH' }
+                Write-Host "    SSL cert: $sslThumb [$matchLabel]"
+            }
+            elseif ($sslThumb) {
+                Write-Host "    SSL cert: $sslThumb"
+            }
+
+            # HTTP connectivity check
             try {
                 $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop
                 $status = [PSCustomObject]@{
-                    Instance = $name
-                    Url      = $url
-                    Status   = "OK"
-                    Response = "$($resp.StatusCode) $($resp.StatusDescription)"
-                    Error    = $null
+                    Instance      = $name
+                    Url           = $url
+                    Status        = "OK"
+                    Response      = "$($resp.StatusCode) $($resp.StatusDescription)"
+                    Error         = $null
+                    SslThumbprint = $sslThumb
+                    SslMatch      = $sslMatch
                 }
                 Write-Host "    OK ($($resp.StatusCode))"
             }
@@ -70,21 +142,25 @@ function Test-BCWebServices {
                 $errmsg = $_.Exception.Message
                 if ($errmsg -match '401|403') {
                     $status = [PSCustomObject]@{
-                        Instance = $name
-                        Url      = $url
-                        Status   = "OK (Auth Required)"
-                        Response = $errmsg
-                        Error    = $null
+                        Instance      = $name
+                        Url           = $url
+                        Status        = "OK (Auth Required)"
+                        Response      = $errmsg
+                        Error         = $null
+                        SslThumbprint = $sslThumb
+                        SslMatch      = $sslMatch
                     }
                     Write-Host "    WS risponde (autenticazione richiesta)."
                 }
                 else {
                     $status = [PSCustomObject]@{
-                        Instance = $name
-                        Url      = $url
-                        Status   = "ERROR"
-                        Response = $null
-                        Error    = $errmsg
+                        Instance      = $name
+                        Url           = $url
+                        Status        = "ERROR"
+                        Response      = $null
+                        Error         = $errmsg
+                        SslThumbprint = $sslThumb
+                        SslMatch      = $sslMatch
                     }
                     Write-Warning "    Errore: $errmsg"
                 }

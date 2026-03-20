@@ -1,4 +1,7 @@
 {
+  "Context": {
+    "CustomerName": "<SET_CUSTOMER_NAME>"
+  },
   "Pfx": {
     "Path": "C:\\_install",
     "Password": "",
