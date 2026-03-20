@@ -28,8 +28,9 @@ function Get-BCThumbprint {
     # Warn on cross-instance inconsistency
     $uniqueThumbs = @($found | Select-Object -ExpandProperty Thumbprint -Unique)
     if ($uniqueThumbs.Count -gt 1) {
-        Write-Warning "Thumbprint INCONSISTENTI tra istanze BC:"
+        Write-Warning "ATTENZIONE: Thumbprint NON UNIFORMI tra istanze BC. CERTAMENT procedera' con la prima istanza rilevata."
         $found | ForEach-Object { Write-Warning ("  {0} -> {1}" -f $_.Instance, $_.Thumbprint) }
+        Write-Warning "Verificare manualmente che tutte le istanze BC siano allineate al medesimo certificato."
     }
 
     return $found[0].Thumbprint

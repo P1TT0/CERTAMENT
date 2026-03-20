@@ -29,7 +29,10 @@ if (-not (Test-Path $configPath)) {
     exit 1
 }
 
-$config = Get-Content -Raw -Path $configPath | ConvertFrom-Json
+$configRaw = Get-Content -Raw -Path $configPath
+# Rimuovi righe con commenti // (stile JSON non standard) prima del parse
+$configRaw = ($configRaw -split "\r?\n" | Where-Object { $_ -notmatch '^\s*//' }) -join "`n"
+$config = $configRaw | ConvertFrom-Json
 
 # ============================================================
 # Logging
@@ -131,6 +134,15 @@ $moduleDir = Join-Path $PSScriptRoot "modules"
 $script:HeartbeatFailureNotified = $false
 
 # ============================================================
+# Helper: exit with transcript cleanup
+# ============================================================
+function Exit-WithCode {
+    param([int]$Code)
+    try { Stop-Transcript | Out-Null } catch {}
+    exit $Code
+}
+
+# ============================================================
 # Helper: customer context
 # ============================================================
 function Get-CustomerName {
@@ -162,6 +174,10 @@ function Get-CertamentTitle {
 # Helper: build webhook hashtable from config
 # ============================================================
 function Get-WebhookTable {
+    if ($config.Notifications -and $config.Notifications.EnableWebhook -eq $false) {
+        Write-Host "[INFO] Webhook disabilitati (Notifications.EnableWebhook=false). Notifiche soppresse."
+        return @{}
+    }
     $wh = @{}
     if ($config.Notifications.Webhooks.Customer) { $wh['Customer'] = $config.Notifications.Webhooks.Customer }
     if ($config.Notifications.Webhooks.Internal) { $wh['Internal'] = $config.Notifications.Webhooks.Internal }
@@ -196,6 +212,12 @@ function Send-CustomerNotification {
         [string]$Message,
         [string]$ContextLabel = ""
     )
+
+    if ($config.Notifications -and $config.Notifications.CertificateExpiry -and
+        $config.Notifications.CertificateExpiry.EnableCustomerNotification -eq $false) {
+        Write-Host "[INFO] Notifiche Customer disabilitate (EnableCustomerNotification=false). Messaggio soppresso."
+        return $true
+    }
 
     $webhooks = Get-WebhookTable
     $fullTitle = Get-CertamentTitle -BaseTitle $Title
@@ -517,8 +539,7 @@ function Main {
         Write-Warning "Nessun certificato configurato in Business Central."
         Send-FailureNotification -Context "Lettura certificato BC" -ErrorDetail "Nessun thumbprint trovato nelle istanze BC."
         Invoke-Heartbeat -Status "Error" -Stage "ReadBCThumbprint" -Detail "Nessun thumbprint BC configurato" | Out-Null
-        Stop-Transcript | Out-Null
-        return
+        Exit-WithCode 1
     }
 
     # ----------------------------------------------------------
@@ -529,8 +550,7 @@ function Main {
     if (-not $certDetails) {
         Send-FailureNotification -Context "Dettagli certificato" -ErrorDetail "Certificato $thumbprint non trovato nello store."
         Invoke-Heartbeat -Status "Error" -Stage "ReadCertDetails" -Detail "Certificato attuale non trovato nello store" | Out-Null
-        Stop-Transcript | Out-Null
-        return
+        Exit-WithCode 1
     }
 
     $currentExpiry = $certDetails.NotAfter
@@ -552,8 +572,7 @@ function Main {
     if ($daysLeft -gt $expiryThreshold) {
         Write-Host "`nCertificato valido. Nessuna azione necessaria."
         Invoke-Heartbeat -Status "Healthy" -Stage "NoActionNeeded" -Detail "Certificato valido ($daysLeft giorni rimanenti)" | Out-Null
-        Stop-Transcript | Out-Null
-        return
+        Exit-WithCode 0
     }
 
     $expiryLabel = if ($certAlreadyExpired) { "GIA' SCADUTO" } else { "in scadenza ($daysLeft giorni)" }
@@ -568,11 +587,10 @@ function Main {
     if ([string]::IsNullOrWhiteSpace($pfxFile)) {
         Write-Warning "Nessun file PFX trovato in $pfxPath"
         $null = Send-CustomerNotification -Title "CERTAMENT - Certificato in scadenza" `
-            -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni**.`nCaricare un nuovo PFX sul server **$hostname** in: **$pfxPath**") `
+            -Message ("Il certificato **$($certDetails.Subject)** e' **$expiryLabel**.`nCaricare un nuovo PFX sul server **$hostname** in: **$pfxPath**") `
             -ContextLabel "Certificato in scadenza - PFX mancante"
         Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxMissing" -Detail "Nessun PFX trovato in $pfxPath" | Out-Null
-        Stop-Transcript | Out-Null
-        return
+        Exit-WithCode 2
     }
 
     # Case 2: Read PFX
@@ -593,11 +611,10 @@ function Main {
     if ([string]::IsNullOrWhiteSpace($pfxPasswordPlain)) {
         Write-Warning "Nessuna password PFX disponibile. Creare password.txt in $pfxPath"
         $null = Send-CustomerNotification -Title "CERTAMENT - Password PFX mancante" `
-            -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni**.`nE' stato trovato un PFX ma manca la password.`nCreare il file **password.txt** in **$pfxPath** con la password del PFX.") `
+            -Message ("Il certificato **$($certDetails.Subject)** e' **$expiryLabel**.`nE' stato trovato un PFX ma manca la password.`nCreare il file **password.txt** in **$pfxPath** con la password del PFX.") `
             -ContextLabel "Certificato in scadenza - password PFX mancante"
         Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxNoPassword" -Detail "Nessuna password PFX disponibile" | Out-Null
-        Stop-Transcript | Out-Null
-        return
+        Exit-WithCode 2
     }
 
     try {
@@ -609,11 +626,10 @@ function Main {
     catch {
         Write-Warning "Errore lettura PFX: $($_.Exception.Message)"
         $null = Send-CustomerNotification -Title "CERTAMENT - Certificato in scadenza" `
-            -Message ("Il certificato **$($certDetails.Subject)** scadra tra **$daysLeft giorni** ma il PFX non e' leggibile.`nVerificare che la password sia corretta.`nCaricare un nuovo PFX su **$hostname** in: **$pfxPath**") `
+            -Message ("Il certificato **$($certDetails.Subject)** e' **$expiryLabel** ma il PFX non e' leggibile.`nVerificare che la password sia corretta.`nCaricare un nuovo PFX su **$hostname** in: **$pfxPath**") `
             -ContextLabel "Certificato in scadenza - PFX non leggibile"
         Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxUnreadable" -Detail $_.Exception.Message | Out-Null
-        Stop-Transcript | Out-Null
-        return
+        Exit-WithCode 2
     }
 
     # Case 3a: PFX cert already expired
@@ -623,8 +639,7 @@ function Main {
             -Message ("Il certificato **$($certDetails.Subject)** e' $expiryLabel.`nIl PFX trovato in **$pfxPath** contiene a sua volta un certificato **gia' scaduto** ($pfxExpiry).`nCaricare un PFX con un certificato valido.") `
             -ContextLabel "Certificato scaduto - PFX scaduto"
         Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxExpired" -Detail "PFX trovato ma certificato gia' scaduto: $pfxExpiry" | Out-Null
-        Stop-Transcript | Out-Null
-        return
+        Exit-WithCode 2
     }
 
     # Case 3b: PFX not newer
@@ -634,8 +649,7 @@ function Main {
             -Message ("Il certificato **$($certDetails.Subject)** e' $expiryLabel.`nIl PFX presente in **$pfxPath** non contiene un certificato piu recente.`nCaricare un nuovo PFX aggiornato.") `
             -ContextLabel "Certificato scaduto - PFX non aggiornato"
         Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxNotNewer" -Detail "PFX presente ma non piu recente del certificato attuale" | Out-Null
-        Stop-Transcript | Out-Null
-        return
+        Exit-WithCode 2
     }
 
     # ----------------------------------------------------------
@@ -646,8 +660,7 @@ function Main {
     if (-not $installedCert -or $installedCert -eq $false) {
         Send-FailureNotification -Context "Installazione PFX" -ErrorDetail "Install-PfxCert ha restituito errore per $pfxFile"
         Invoke-Heartbeat -Status "Error" -Stage "InstallPfx" -Detail "Install-PfxCert fallita" | Out-Null
-        Stop-Transcript | Out-Null
-        return
+        Exit-WithCode 1
     }
 
     $newThumb = $installedCert.Thumbprint
@@ -789,6 +802,10 @@ Servizi BC e IIS aggiornati.
         Invoke-Heartbeat -Status "Completed" -Stage "MainEnd" -Detail "Pipeline completata con successo" | Out-Null
     }
 
+    if ($hadPipelineErrors) {
+        Write-Warning "CERTAMENT completato con warning/errori. Verificare i log."
+        Exit-WithCode 1
+    }
     Write-Host "`nCERTAMENT completato con successo."
 }
 
