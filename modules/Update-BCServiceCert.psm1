@@ -3,12 +3,18 @@ function Update-BCServiceCert {
     param (
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
-        [string]$NewThumbprint
+        [string]$NewThumbprint,
+
+        # When provided, only update instances currently configured with this thumbprint.
+        # Instances using a different certificate are left untouched (Result = 'Skipped').
+        [Parameter(Mandatory = $false)]
+        [string]$OldThumbprint = ""
     )
 
     Write-Host "Aggiornamento certificati nei servizi BC..."
 
     $results = @()
+    $oldNorm = if ($OldThumbprint) { ($OldThumbprint -replace '\s', '').ToUpper() } else { "" }
 
     try {
         $instances = Get-NAVServerInstance -ErrorAction Stop
@@ -43,6 +49,14 @@ function Update-BCServiceCert {
 
             $currNorm = ($currentThumb -replace '\s', '').ToUpper()
             $newNorm = ($NewThumbprint -replace '\s', '').ToUpper()
+
+            # If OldThumbprint filter is provided, skip instances using a different certificate.
+            if ($oldNorm -and $currNorm -ne $oldNorm) {
+                Write-Host ("    Certificato diverso ({0}), istanza non pertinente - salto." -f $currNorm)
+                $entry.Result = 'Skipped'
+                $results += $entry
+                continue
+            }
 
             if ($currNorm -eq $newNorm) {
                 Write-Host "    Gia aggiornato."

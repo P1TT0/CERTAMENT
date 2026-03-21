@@ -3,7 +3,9 @@ function Get-BCThumbprint {
     param()
 
     $instances = Get-NAVServerInstance
-    $found = @()
+
+    # Build a map: thumbprint -> list of instance names
+    $thumbInstanceMap = @{}
 
     foreach ($instance in $instances) {
         try {
@@ -14,26 +16,33 @@ function Get-BCThumbprint {
         }
 
         if ($thumbprint -and $thumbprint.Trim() -ne "") {
-            $found += [PSCustomObject]@{
-                Instance   = $instance.ServerInstance
-                Thumbprint = $thumbprint.Trim().ToUpper()
+            $thumb = $thumbprint.Trim().ToUpper()
+            if (-not $thumbInstanceMap.ContainsKey($thumb)) {
+                $thumbInstanceMap[$thumb] = @()
             }
+            $thumbInstanceMap[$thumb] += $instance.ServerInstance
         }
     }
 
-    if ($found.Count -eq 0) {
+    if ($thumbInstanceMap.Count -eq 0) {
         return $null
     }
 
-    # Warn on cross-instance inconsistency
-    $uniqueThumbs = @($found | Select-Object -ExpandProperty Thumbprint -Unique)
-    if ($uniqueThumbs.Count -gt 1) {
-        Write-Warning "ATTENZIONE: Thumbprint NON UNIFORMI tra istanze BC. CERTAMENT procedera' con la prima istanza rilevata."
-        $found | ForEach-Object { Write-Warning ("  {0} -> {1}" -f $_.Instance, $_.Thumbprint) }
-        Write-Warning "Verificare manualmente che tutte le istanze BC siano allineate al medesimo certificato."
+    $result = @(foreach ($thumb in $thumbInstanceMap.Keys) {
+        [PSCustomObject]@{
+            Thumbprint = $thumb
+            Instances  = $thumbInstanceMap[$thumb]
+        }
+    })
+
+    if ($result.Count -gt 1) {
+        Write-Host ("Rilevati {0} certificati distinti tra le istanze BC:" -f $result.Count)
+        foreach ($entry in $result) {
+            Write-Host ("  [{0}] -> istanze: {1}" -f $entry.Thumbprint, ($entry.Instances -join ', '))
+        }
     }
 
-    return $found[0].Thumbprint
+    return $result
 }
 
 Export-ModuleMember -Function Get-BCThumbprint

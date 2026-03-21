@@ -6,6 +6,11 @@ function Update-IISBinding {
 
         [string]$SiteName = "Microsoft Dynamics 365 Business Central Web Client",
 
+        # When provided, only update bindings currently using this thumbprint.
+        # Bindings with a different certificate are left untouched (Result = 'Skipped').
+        [Parameter(Mandatory = $false)]
+        [string]$OldThumbprint = "",
+
         [switch]$RestartIIS
     )
 
@@ -21,6 +26,7 @@ function Update-IISBinding {
     }
 
     $newNorm = ($NewThumbprint -replace '\s', '').ToUpper()
+    $oldNorm = if ($OldThumbprint) { ($OldThumbprint -replace '\s', '').ToUpper() } else { "" }
 
     Write-Host "Update-IISBinding: aggiornamento binding per '$SiteName'..."
 
@@ -77,6 +83,14 @@ function Update-IISBinding {
         if ($oldThumb -eq $newNorm) {
             $status.Result = "AlreadyUpToDate"
             Write-Host ("    Binding {0} gia aggiornato." -f $bindingInfo)
+            $results += $status
+            continue
+        }
+
+        # If OldThumbprint filter is provided, skip bindings that use a different certificate.
+        if ($oldNorm -and $oldThumb -and $oldThumb -ne $oldNorm) {
+            $status.Result = "Skipped"
+            Write-Host ("    Binding {0} usa certificato diverso ({1}), salto." -f $bindingInfo, $oldThumb)
             $results += $status
             continue
         }

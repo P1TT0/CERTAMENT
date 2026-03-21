@@ -413,9 +413,15 @@ function Wait-ForWebServices {
 # Helper: verify BC post-update (thumbprint + Running state)
 # ============================================================
 function Test-BCPostUpdate {
-    param([string]$ExpectedThumbprint)
+    param(
+        [string]$ExpectedThumbprint,
+        # When provided, only verify instances that previously used this thumbprint.
+        # Instances with a different certificate are not checked.
+        [string]$OldThumbprint = ""
+    )
 
     $expectedNorm = ($ExpectedThumbprint -replace '\s', '').ToUpper()
+    $oldNorm = if ($OldThumbprint) { ($OldThumbprint -replace '\s', '').ToUpper() } else { "" }
     $errors = @()
 
     try {
@@ -434,6 +440,15 @@ function Test-BCPostUpdate {
             if ($thumb -and $thumb.Trim() -ne "") {
                 $hasThumb = $true
                 $thumbNorm = ($thumb -replace '\s', '').ToUpper()
+
+                # If OldThumbprint filter is set, skip instances that are unrelated to this renewal.
+                # An instance is relevant only if its current thumbprint is the expected new value
+                # or still the old value (not yet updated).
+                if ($oldNorm -and $thumbNorm -ne $expectedNorm -and $thumbNorm -ne $oldNorm) {
+                    $hasThumb = $false
+                    continue
+                }
+
                 if ($thumbNorm -ne $expectedNorm) {
                     $errors += "$name : thumbprint $thumbNorm (atteso $expectedNorm)"
                 }
@@ -531,268 +546,310 @@ function Main {
     $iisRestart = $config.IIS.RestartAfterUpdate -ne $false
 
     # ----------------------------------------------------------
-    # Step 1: Get current certificate from BC
+    # Step 1: Read ALL unique certificates from BC instances
     # ----------------------------------------------------------
-    Write-Host "`n[1/7] Lettura certificato attuale da Business Central..."
-    $thumbprint = Get-BCThumbprint
-    if (-not $thumbprint) {
+    Write-Host "`n[1] Lettura certificati da Business Central..."
+    $certGroups = Get-BCThumbprint
+    if (-not $certGroups) {
         Write-Warning "Nessun certificato configurato in Business Central."
         Send-FailureNotification -Context "Lettura certificato BC" -ErrorDetail "Nessun thumbprint trovato nelle istanze BC."
         Invoke-Heartbeat -Status "Error" -Stage "ReadBCThumbprint" -Detail "Nessun thumbprint BC configurato" | Out-Null
         Exit-WithCode 1
     }
 
+    $certGroups = @($certGroups)
+    Write-Host ("Trovati {0} certificato/i distinto/i tra le istanze BC." -f $certGroups.Count)
+
     # ----------------------------------------------------------
-    # Step 2: Get cert details
+    # Step 2: Check each certificate for expiry
     # ----------------------------------------------------------
-    Write-Host "[2/7] Lettura dettagli certificato..."
-    $certDetails = $thumbprint | Get-CertDetails
-    if (-not $certDetails) {
-        Send-FailureNotification -Context "Dettagli certificato" -ErrorDetail "Certificato $thumbprint non trovato nello store."
-        Invoke-Heartbeat -Status "Error" -Stage "ReadCertDetails" -Detail "Certificato attuale non trovato nello store" | Out-Null
-        Exit-WithCode 1
+    Write-Host "`n[2] Verifica scadenza certificati..."
+    $expiringCerts = @()
+
+    foreach ($group in $certGroups) {
+        $certDetails = Get-CertDetails -Thumbprint $group.Thumbprint
+        if (-not $certDetails) {
+            Write-Warning ("Certificato {0} non trovato nello store (istanze: {1})." -f $group.Thumbprint, ($group.Instances -join ', '))
+            Send-FailureNotification -Context "Dettagli certificato" -ErrorDetail ("Certificato {0} non trovato nello store. Istanze: {1}" -f $group.Thumbprint, ($group.Instances -join ', '))
+            $hadPipelineErrors = $true
+            continue
+        }
+
+        $daysLeft = [math]::Floor(($certDetails.NotAfter - (Get-Date)).TotalDays)
+        $certAlreadyExpired = $daysLeft -lt 0
+        if ($certAlreadyExpired) { $daysLeft = 0 }
+
+        $instanceList = $group.Instances -join ', '
+        if ($certAlreadyExpired) {
+            Write-Warning ("  [{0}] {1} - GIA' SCADUTO (istanze: {2})" -f $group.Thumbprint, $certDetails.Subject, $instanceList)
+        }
+        else {
+            Write-Host ("  [{0}] {1} - {2} giorni rimanenti (istanze: {3})" -f $group.Thumbprint, $certDetails.Subject, $daysLeft, $instanceList)
+        }
+
+        if ($daysLeft -le $expiryThreshold) {
+            $expiringCerts += [PSCustomObject]@{
+                Group       = $group
+                CertDetails = $certDetails
+                DaysLeft    = $daysLeft
+                IsExpired   = $certAlreadyExpired
+            }
+        }
     }
 
-    $currentExpiry = $certDetails.NotAfter
-    $daysLeft = [math]::Floor(($currentExpiry - (Get-Date)).TotalDays)
-    $certAlreadyExpired = $daysLeft -lt 0
-    if ($certAlreadyExpired) { $daysLeft = 0 }
-
-    Write-Host "Certificato: $($certDetails.Subject)"
-    Write-Host "Thumbprint:  $($certDetails.Thumbprint)"
-    if ($certAlreadyExpired) {
-        Write-Warning "Scadenza:    $currentExpiry (GIA' SCADUTO)"
-    } else {
-        Write-Host "Scadenza:    $currentExpiry ($daysLeft giorni rimanenti)"
-    }
-
     # ----------------------------------------------------------
-    # Step 3: Check expiry threshold
+    # Step 3: If no certificate is expiring, exit healthy
     # ----------------------------------------------------------
-    if ($daysLeft -gt $expiryThreshold) {
-        Write-Host "`nCertificato valido. Nessuna azione necessaria."
-        Invoke-Heartbeat -Status "Healthy" -Stage "NoActionNeeded" -Detail "Certificato valido ($daysLeft giorni rimanenti)" | Out-Null
+    if ($expiringCerts.Count -eq 0) {
+        Write-Host "`nTutti i certificati sono validi. Nessuna azione necessaria."
+        Invoke-Heartbeat -Status "Healthy" -Stage "NoActionNeeded" -Detail "Tutti i certificati validi" | Out-Null
         Exit-WithCode 0
     }
 
-    $expiryLabel = if ($certAlreadyExpired) { "GIA' SCADUTO" } else { "in scadenza ($daysLeft giorni)" }
-    Write-Host "`n[3/7] Certificato $expiryLabel. Verifica PFX..."
+    Write-Host ("`n{0} certificato/i in scadenza." -f $expiringCerts.Count)
 
     # ----------------------------------------------------------
-    # Step 4: Find PFX
+    # Steps 4-7: Renew each expiring certificate independently
     # ----------------------------------------------------------
-    $pfxFile = Get-PfxFile -Path $pfxPath
-
-    # Case 1: No PFX found
-    if ([string]::IsNullOrWhiteSpace($pfxFile)) {
-        Write-Warning "Nessun file PFX trovato in $pfxPath"
-        $null = Send-CustomerNotification -Title "CERTAMENT - Certificato in scadenza" `
-            -Message ("Il certificato **$($certDetails.Subject)** e' **$expiryLabel**.`nCaricare un nuovo PFX sul server **$hostname** in: **$pfxPath**") `
-            -ContextLabel "Certificato in scadenza - PFX mancante"
-        Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxMissing" -Detail "Nessun PFX trovato in $pfxPath" | Out-Null
-        Exit-WithCode 2
-    }
-
-    # Case 2: Read PFX
-    Write-Host "[4/7] PFX trovato: $pfxFile. Lettura..."
-
-    # --- Resolve PFX password: password.txt > config fallback ---
-    $pfxPasswordPlain = $null
     $passwordFile = Join-Path $pfxPath "password.txt"
-    if (Test-Path $passwordFile) {
-        $pfxPasswordPlain = (Get-Content -Path $passwordFile -Raw -ErrorAction Stop).Trim()
-        Write-Host "Password letta da: $passwordFile"
-    }
-    elseif ($config.Pfx.Password -and $config.Pfx.Password.Trim() -ne "") {
-        $pfxPasswordPlain = $config.Pfx.Password
-        Write-Host "Password da config.json (fallback)"
-    }
 
-    if ([string]::IsNullOrWhiteSpace($pfxPasswordPlain)) {
-        Write-Warning "Nessuna password PFX disponibile. Creare password.txt in $pfxPath"
-        $null = Send-CustomerNotification -Title "CERTAMENT - Password PFX mancante" `
-            -Message ("Il certificato **$($certDetails.Subject)** e' **$expiryLabel**.`nE' stato trovato un PFX ma manca la password.`nCreare il file **password.txt** in **$pfxPath** con la password del PFX.") `
-            -ContextLabel "Certificato in scadenza - password PFX mancante"
-        Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxNoPassword" -Detail "Nessuna password PFX disponibile" | Out-Null
-        Exit-WithCode 2
-    }
+    foreach ($expiring in $expiringCerts) {
+        $oldThumb      = $expiring.Group.Thumbprint
+        $certDetails   = $expiring.CertDetails
+        $daysLeft      = $expiring.DaysLeft
+        $certAlreadyExpired = $expiring.IsExpired
+        $instanceList  = $expiring.Group.Instances -join ', '
+        $expiryLabel   = if ($certAlreadyExpired) { "GIA' SCADUTO" } else { "in scadenza ($daysLeft giorni)" }
 
-    try {
-        $pfxPassword = ConvertTo-SecureString $pfxPasswordPlain -AsPlainText -Force
-        $pfxData = Get-PfxData -FilePath $pfxFile -Password $pfxPassword
-        $pfxExpiry = $pfxData.EndEntityCertificates.NotAfter
-        $pfxThumb = $pfxData.EndEntityCertificates.Thumbprint
-    }
-    catch {
-        Write-Warning "Errore lettura PFX: $($_.Exception.Message)"
-        $null = Send-CustomerNotification -Title "CERTAMENT - Certificato in scadenza" `
-            -Message ("Il certificato **$($certDetails.Subject)** e' **$expiryLabel** ma il PFX non e' leggibile.`nVerificare che la password sia corretta.`nCaricare un nuovo PFX su **$hostname** in: **$pfxPath**") `
-            -ContextLabel "Certificato in scadenza - PFX non leggibile"
-        Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxUnreadable" -Detail $_.Exception.Message | Out-Null
-        Exit-WithCode 2
-    }
+        Write-Host ("`n" + ("-" * 60))
+        Write-Host ("Rinnovo: {0} [{1}]" -f $certDetails.Subject, $oldThumb)
+        Write-Host ("Istanze BC interessate: {0}" -f $instanceList)
+        Write-Host ("-" * 60)
 
-    # Case 3a: PFX cert already expired
-    if ($pfxExpiry -lt (Get-Date)) {
-        Write-Warning "Il PFX contiene un certificato gia' scaduto ($pfxExpiry). Non verra' installato."
-        $null = Send-CustomerNotification -Title "CERTAMENT - PFX scaduto" `
-            -Message ("Il certificato **$($certDetails.Subject)** e' $expiryLabel.`nIl PFX trovato in **$pfxPath** contiene a sua volta un certificato **gia' scaduto** ($pfxExpiry).`nCaricare un PFX con un certificato valido.") `
-            -ContextLabel "Certificato scaduto - PFX scaduto"
-        Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxExpired" -Detail "PFX trovato ma certificato gia' scaduto: $pfxExpiry" | Out-Null
-        Exit-WithCode 2
-    }
+        # ---- Step 4: Find PFX ----
+        Write-Host "[4] Verifica PFX disponibile..."
+        $pfxFile = Get-PfxFile -Path $pfxPath
 
-    # Case 3b: PFX not newer
-    if ($pfxExpiry -le $currentExpiry -or $pfxThumb -eq $certDetails.Thumbprint) {
-        Write-Warning "Il PFX non e' piu recente del certificato attuale."
-        $null = Send-CustomerNotification -Title "CERTAMENT - PFX non aggiornato" `
-            -Message ("Il certificato **$($certDetails.Subject)** e' $expiryLabel.`nIl PFX presente in **$pfxPath** non contiene un certificato piu recente.`nCaricare un nuovo PFX aggiornato.") `
-            -ContextLabel "Certificato scaduto - PFX non aggiornato"
-        Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxNotNewer" -Detail "PFX presente ma non piu recente del certificato attuale" | Out-Null
-        Exit-WithCode 2
-    }
-
-    # ----------------------------------------------------------
-    # Case 4: PFX valid and newer - full pipeline
-    # ----------------------------------------------------------
-    Write-Host "[5/7] Installazione nuovo certificato..."
-    $installedCert = Install-PfxCert -PfxPath $pfxFile -Password $pfxPassword
-    if (-not $installedCert -or $installedCert -eq $false) {
-        Send-FailureNotification -Context "Installazione PFX" -ErrorDetail "Install-PfxCert ha restituito errore per $pfxFile"
-        Invoke-Heartbeat -Status "Error" -Stage "InstallPfx" -Detail "Install-PfxCert fallita" | Out-Null
-        Exit-WithCode 1
-    }
-
-    $newThumb = $installedCert.Thumbprint
-    Write-Host "Installato: $($installedCert.Subject) [$newThumb]"
-
-    # Update BC
-    Write-Host "[6/7] Aggiornamento istanze Business Central..."
-    $bcResults = Update-BCServiceCert -NewThumbprint $newThumb
-    if ($bcResults) { $bcResults | Format-Table -AutoSize }
-
-    $bcErrors = @($bcResults | Where-Object { $_.Result -eq 'Error' })
-    if ($bcErrors.Count -gt 0) {
-        $errText = ($bcErrors | ForEach-Object { "$($_.Instance): $($_.ErrorMessage)" }) -join "; "
-        Send-FailureNotification -Context "Aggiornamento BC" -ErrorDetail $errText
-        $hadPipelineErrors = $true
-    }
-
-    # --- Post-BC verification with auto-remediation ---
-    Write-Host "`nVerifica post-aggiornamento BC (attesa avvio servizi)..."
-    Start-Sleep -Seconds 15
-    $bcVerifyErrors = Test-BCPostUpdate -ExpectedThumbprint $newThumb
-    if ($bcVerifyErrors) {
-        Write-Warning "Verifica BC fallita: $($bcVerifyErrors -join '; ')"
-        Write-Host "Retry aggiornamento BC..."
-        $bcRetry = Update-BCServiceCert -NewThumbprint $newThumb
-        if ($bcRetry) { $bcRetry | Format-Table -AutoSize }
-        Start-Sleep -Seconds 15
-        $bcVerifyErrors2 = Test-BCPostUpdate -ExpectedThumbprint $newThumb
-        if ($bcVerifyErrors2) {
-            $errDetail = $bcVerifyErrors2 -join "; "
-            Send-FailureNotification -Context "Verifica post-aggiornamento BC" -ErrorDetail "Fallita anche dopo retry: $errDetail"
+        # Case 1: No PFX found
+        if ([string]::IsNullOrWhiteSpace($pfxFile)) {
+            Write-Warning "Nessun file PFX trovato in $pfxPath"
+            $null = Send-CustomerNotification -Title "CERTAMENT - Certificato in scadenza" `
+                -Message ("Il certificato **$($certDetails.Subject)** e' **$expiryLabel**.`nCaricare un nuovo PFX sul server **$hostname** in: **$pfxPath**") `
+                -ContextLabel "Certificato in scadenza - PFX mancante"
+            Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxMissing" -Detail ("Nessun PFX trovato in $pfxPath per $oldThumb") | Out-Null
             $hadPipelineErrors = $true
+            continue
         }
-        else {
-            Write-Host "Remediation BC riuscita dopo retry."
+
+        # Case 2: Read PFX
+        Write-Host "PFX trovato: $pfxFile. Lettura..."
+
+        # --- Resolve PFX password: password.txt > config fallback ---
+        $pfxPasswordPlain = $null
+        if (Test-Path $passwordFile) {
+            $pfxPasswordPlain = (Get-Content -Path $passwordFile -Raw -ErrorAction Stop).Trim()
+            Write-Host "Password letta da: $passwordFile"
         }
-    }
-    else {
-        Write-Host "Verifica BC OK: thumbprint e stato Running confermati."
-    }
+        elseif ($config.Pfx.Password -and $config.Pfx.Password.Trim() -ne "") {
+            $pfxPasswordPlain = $config.Pfx.Password
+            Write-Host "Password da config.json (fallback)"
+        }
 
-    # Update IIS
-    Write-Host "`n[7/7] Aggiornamento binding IIS..."
-    try {
-        $iisResults = Update-IISBinding -NewThumbprint $newThumb -SiteName $iisSiteName -RestartIIS:$iisRestart
-        if ($iisResults) { $iisResults | Format-Table -AutoSize }
-    }
-    catch {
-        Send-FailureNotification -Context "Aggiornamento IIS" -ErrorDetail $_.Exception.Message
-        $hadPipelineErrors = $true
-    }
+        if ([string]::IsNullOrWhiteSpace($pfxPasswordPlain)) {
+            Write-Warning "Nessuna password PFX disponibile. Creare password.txt in $pfxPath"
+            $null = Send-CustomerNotification -Title "CERTAMENT - Password PFX mancante" `
+                -Message ("Il certificato **$($certDetails.Subject)** e' **$expiryLabel**.`nE' stato trovato un PFX ma manca la password.`nCreare il file **password.txt** in **$pfxPath** con la password del PFX.") `
+                -ContextLabel "Certificato in scadenza - password PFX mancante"
+            Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxNoPassword" -Detail "Nessuna password PFX disponibile" | Out-Null
+            $hadPipelineErrors = $true
+            continue
+        }
 
-    # --- Post-IIS verification with auto-remediation ---
-    Write-Host "`nVerifica post-aggiornamento IIS..."
-    $iisVerifyErrors = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName
-    if ($iisVerifyErrors) {
-        Write-Warning "Verifica IIS fallita: $($iisVerifyErrors -join '; ')"
-        Write-Host "Retry aggiornamento IIS (con restart forzato)..."
         try {
-            $iisRetry = Update-IISBinding -NewThumbprint $newThumb -SiteName $iisSiteName -RestartIIS
-            if ($iisRetry) { $iisRetry | Format-Table -AutoSize }
+            $pfxPassword = ConvertTo-SecureString $pfxPasswordPlain -AsPlainText -Force
+            $pfxData = Get-PfxData -FilePath $pfxFile -Password $pfxPassword
+            $pfxExpiry = $pfxData.EndEntityCertificates.NotAfter
+            $pfxThumb  = $pfxData.EndEntityCertificates.Thumbprint
         }
         catch {
-            Write-Warning "Retry IIS fallito: $($_.Exception.Message)"
+            Write-Warning "Errore lettura PFX: $($_.Exception.Message)"
+            $null = Send-CustomerNotification -Title "CERTAMENT - Certificato in scadenza" `
+                -Message ("Il certificato **$($certDetails.Subject)** e' **$expiryLabel** ma il PFX non e' leggibile.`nVerificare che la password sia corretta.`nCaricare un nuovo PFX su **$hostname** in: **$pfxPath**") `
+                -ContextLabel "Certificato in scadenza - PFX non leggibile"
+            Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxUnreadable" -Detail $_.Exception.Message | Out-Null
+            $hadPipelineErrors = $true
+            continue
         }
-        Start-Sleep -Seconds 10
-        $iisVerifyErrors2 = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName
-        if ($iisVerifyErrors2) {
-            $errDetail = $iisVerifyErrors2 -join "; "
-            Send-FailureNotification -Context "Verifica post-aggiornamento IIS" -ErrorDetail "Fallita anche dopo retry con restart: $errDetail"
+
+        # Case 3a: PFX cert already expired
+        if ($pfxExpiry -lt (Get-Date)) {
+            Write-Warning "Il PFX contiene un certificato gia' scaduto ($pfxExpiry). Non verra' installato."
+            $null = Send-CustomerNotification -Title "CERTAMENT - PFX scaduto" `
+                -Message ("Il certificato **$($certDetails.Subject)** e' $expiryLabel.`nIl PFX trovato in **$pfxPath** contiene a sua volta un certificato **gia' scaduto** ($pfxExpiry).`nCaricare un PFX con un certificato valido.") `
+                -ContextLabel "Certificato scaduto - PFX scaduto"
+            Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxExpired" -Detail "PFX trovato ma certificato gia' scaduto: $pfxExpiry" | Out-Null
+            $hadPipelineErrors = $true
+            continue
+        }
+
+        # Case 3b: PFX not newer
+        if ($pfxExpiry -le $certDetails.NotAfter -or $pfxThumb -eq $oldThumb) {
+            Write-Warning "Il PFX non e' piu recente del certificato attuale."
+            $null = Send-CustomerNotification -Title "CERTAMENT - PFX non aggiornato" `
+                -Message ("Il certificato **$($certDetails.Subject)** e' $expiryLabel.`nIl PFX presente in **$pfxPath** non contiene un certificato piu recente.`nCaricare un nuovo PFX aggiornato.") `
+                -ContextLabel "Certificato scaduto - PFX non aggiornato"
+            Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxNotNewer" -Detail "PFX presente ma non piu recente del certificato attuale" | Out-Null
+            $hadPipelineErrors = $true
+            continue
+        }
+
+        # ---- Step 5: Install PFX ----
+        Write-Host "[5] Installazione nuovo certificato..."
+        $installedCert = Install-PfxCert -PfxPath $pfxFile -Password $pfxPassword
+        if (-not $installedCert -or $installedCert -eq $false) {
+            Send-FailureNotification -Context "Installazione PFX" -ErrorDetail "Install-PfxCert ha restituito errore per $pfxFile"
+            Invoke-Heartbeat -Status "Error" -Stage "InstallPfx" -Detail "Install-PfxCert fallita" | Out-Null
+            $hadPipelineErrors = $true
+            continue
+        }
+
+        $newThumb = $installedCert.Thumbprint
+        Write-Host "Installato: $($installedCert.Subject) [$newThumb]"
+
+        # ---- Step 6: Update BC (only instances using the old certificate) ----
+        Write-Host "[6] Aggiornamento istanze Business Central (vecchio thumb: $oldThumb)..."
+        $bcResults = Update-BCServiceCert -NewThumbprint $newThumb -OldThumbprint $oldThumb
+        if ($bcResults) { $bcResults | Format-Table -AutoSize }
+
+        $bcErrors = @($bcResults | Where-Object { $_.Result -eq 'Error' })
+        if ($bcErrors.Count -gt 0) {
+            $errText = ($bcErrors | ForEach-Object { "$($_.Instance): $($_.ErrorMessage)" }) -join "; "
+            Send-FailureNotification -Context "Aggiornamento BC" -ErrorDetail $errText
             $hadPipelineErrors = $true
         }
-        else {
-            Write-Host "Remediation IIS riuscita dopo retry."
+
+        # --- Post-BC verification with auto-remediation ---
+        Write-Host "`nVerifica post-aggiornamento BC (attesa avvio servizi)..."
+        Start-Sleep -Seconds 15
+        $bcVerifyErrors = Test-BCPostUpdate -ExpectedThumbprint $newThumb -OldThumbprint $oldThumb
+        if ($bcVerifyErrors) {
+            Write-Warning "Verifica BC fallita: $($bcVerifyErrors -join '; ')"
+            Write-Host "Retry aggiornamento BC..."
+            $bcRetry = Update-BCServiceCert -NewThumbprint $newThumb -OldThumbprint $oldThumb
+            if ($bcRetry) { $bcRetry | Format-Table -AutoSize }
+            Start-Sleep -Seconds 15
+            $bcVerifyErrors2 = Test-BCPostUpdate -ExpectedThumbprint $newThumb -OldThumbprint $oldThumb
+            if ($bcVerifyErrors2) {
+                $errDetail = $bcVerifyErrors2 -join "; "
+                Send-FailureNotification -Context "Verifica post-aggiornamento BC" -ErrorDetail "Fallita anche dopo retry: $errDetail"
+                $hadPipelineErrors = $true
+            }
+            else {
+                Write-Host "Remediation BC riuscita dopo retry."
+            }
         }
-    }
-    else {
-        Write-Host "Verifica IIS OK: binding aggiornati correttamente."
-    }
+        else {
+            Write-Host "Verifica BC OK: thumbprint e stato Running confermati."
+        }
 
-    # Smoke test with polling + SSL verification (servizi possono metterci fino a 10 min)
-    Write-Host "`nAttesa servizi web post-aggiornamento (fino a 10 min)..."
-    $wsResults = Wait-ForWebServices -MaxWaitSec 600 -IntervalSec 30 -ExpectedThumbprint $newThumb
-    if ($wsResults) { $wsResults | Format-Table -AutoSize }
+        # ---- Step 7: Update IIS (only bindings using the old certificate) ----
+        Write-Host "`n[7] Aggiornamento binding IIS (vecchio thumb: $oldThumb)..."
+        try {
+            $iisResults = Update-IISBinding -NewThumbprint $newThumb -OldThumbprint $oldThumb -SiteName $iisSiteName -RestartIIS:$iisRestart
+            if ($iisResults) { $iisResults | Format-Table -AutoSize }
+        }
+        catch {
+            Send-FailureNotification -Context "Aggiornamento IIS" -ErrorDetail $_.Exception.Message
+            $hadPipelineErrors = $true
+        }
 
-    $wsErrors = if ($wsResults) { @($wsResults | Where-Object { $_.Status -eq 'ERROR' }) } else { @() }
-    if ($wsErrors.Count -gt 0) {
-        $wsErrText = ($wsErrors | ForEach-Object { "$($_.Instance) [$($_.Url)]: $($_.Error)" }) -join "; "
-        Send-FailureNotification -Context "Verifica servizi web post-aggiornamento" -ErrorDetail $wsErrText
-        $hadPipelineErrors = $true
-    }
+        # --- Post-IIS verification with auto-remediation ---
+        Write-Host "`nVerifica post-aggiornamento IIS..."
+        $iisVerifyErrors = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName
+        if ($iisVerifyErrors) {
+            Write-Warning "Verifica IIS fallita: $($iisVerifyErrors -join '; ')"
+            Write-Host "Retry aggiornamento IIS (con restart forzato)..."
+            try {
+                $iisRetry = Update-IISBinding -NewThumbprint $newThumb -OldThumbprint $oldThumb -SiteName $iisSiteName -RestartIIS
+                if ($iisRetry) { $iisRetry | Format-Table -AutoSize }
+            }
+            catch {
+                Write-Warning "Retry IIS fallito: $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds 10
+            $iisVerifyErrors2 = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName
+            if ($iisVerifyErrors2) {
+                $errDetail = $iisVerifyErrors2 -join "; "
+                Send-FailureNotification -Context "Verifica post-aggiornamento IIS" -ErrorDetail "Fallita anche dopo retry con restart: $errDetail"
+                $hadPipelineErrors = $true
+            }
+            else {
+                Write-Host "Remediation IIS riuscita dopo retry."
+            }
+        }
+        else {
+            Write-Host "Verifica IIS OK: binding aggiornati correttamente."
+        }
 
-    $sslMismatches = if ($wsResults) { @($wsResults | Where-Object { $_.SslMatch -eq $false }) } else { @() }
-    if ($sslMismatches.Count -gt 0) {
-        $sslErrText = ($sslMismatches | ForEach-Object { "$($_.Instance) [$($_.Url)]: SSL cert $($_.SslThumbprint) (atteso $newThumb)" }) -join "; "
-        Send-FailureNotification -Context "Verifica SSL post-aggiornamento" -ErrorDetail $sslErrText
-        $hadPipelineErrors = $true
-    }
+        # Smoke test with polling + SSL verification (servizi possono metterci fino a 10 min)
+        Write-Host "`nAttesa servizi web post-aggiornamento (fino a 10 min)..."
+        $wsResults = Wait-ForWebServices -MaxWaitSec 600 -IntervalSec 30 -ExpectedThumbprint $newThumb
+        if ($wsResults) { $wsResults | Format-Table -AutoSize }
 
-    # Pipeline completion notification
-    $statusLabel = if ($hadPipelineErrors) { "con warning" } else { "con successo" }
-    $notifTitle = if ($hadPipelineErrors) { "CERTAMENT - Certificato aggiornato (con warning)" } else { "CERTAMENT - Certificato aggiornato" }
-    $msg = @"
-Nuovo certificato installato $statusLabel su server **$hostname**.
+        $wsErrors = if ($wsResults) { @($wsResults | Where-Object { $_.Status -eq 'ERROR' }) } else { @() }
+        if ($wsErrors.Count -gt 0) {
+            $wsErrText = ($wsErrors | ForEach-Object { "$($_.Instance) [$($_.Url)]: $($_.Error)" }) -join "; "
+            Send-FailureNotification -Context "Verifica servizi web post-aggiornamento" -ErrorDetail $wsErrText
+            $hadPipelineErrors = $true
+        }
+
+        $sslMismatches = if ($wsResults) { @($wsResults | Where-Object { $_.SslMatch -eq $false }) } else { @() }
+        if ($sslMismatches.Count -gt 0) {
+            $sslErrText = ($sslMismatches | ForEach-Object { "$($_.Instance) [$($_.Url)]: SSL cert $($_.SslThumbprint) (atteso $newThumb)" }) -join "; "
+            Send-FailureNotification -Context "Verifica SSL post-aggiornamento" -ErrorDetail $sslErrText
+            $hadPipelineErrors = $true
+        }
+
+        # Per-cert completion notification
+        $certStatusLabel = if ($hadPipelineErrors) { "con warning" } else { "con successo" }
+        $certNotifTitle  = if ($hadPipelineErrors) { "CERTAMENT - Certificato aggiornato (con warning)" } else { "CERTAMENT - Certificato aggiornato" }
+
+        $bcUpdated  = @($bcResults | Where-Object { $_.Result -eq 'UpdatedAndRestarted' } | ForEach-Object { $_.Instance })
+        $bcSkipped  = @($bcResults | Where-Object { $_.Result -eq 'Skipped' }             | ForEach-Object { $_.Instance })
+        $iisUpdated = @($iisResults | Where-Object { $_.Result -eq 'Updated' }            | ForEach-Object { $_.Binding })
+
+        $certMsg = @"
+Nuovo certificato installato $certStatusLabel su server **$hostname**.
 
 **Cliente:** $(Get-CustomerLabel)
 **Dettagli:**
 - Soggetto: $($installedCert.Subject)
 - Thumbprint: $newThumb
 - Scadenza: $($installedCert.NotAfter)
-
-Servizi BC e IIS aggiornati.
+- Istanze BC aggiornate: $(if ($bcUpdated) { $bcUpdated -join ', ' } else { 'nessuna' })$(if ($bcSkipped) { "`n- Istanze BC saltate (certificato diverso): $($bcSkipped -join ', ')" })
+- Binding IIS aggiornati: $(if ($iisUpdated) { $iisUpdated -join ', ' } else { 'nessuno' })
 "@
-    if ($hadPipelineErrors) {
-        $msg += "`n`n**Attenzione:** si sono verificati errori durante la pipeline. Verificare i log."
-    }
-    $null = Send-InternalNotification -Title $notifTitle -Message $msg
+        if ($hadPipelineErrors) {
+            $certMsg += "`n`n**Attenzione:** si sono verificati errori durante la pipeline. Verificare i log."
+        }
+        $null = Send-InternalNotification -Title $certNotifTitle -Message $certMsg
 
-    # --- Post-pipeline cleanup: delete password.txt and archive PFX ---
+        # --- Post-pipeline cleanup: archive PFX (password.txt deleted once at end) ---
+        $installedDir = Join-Path $pfxPath "installed"
+        if (-not (Test-Path $installedDir)) { New-Item -ItemType Directory -Path $installedDir -Force | Out-Null }
+        try {
+            Move-Item -Path $pfxFile -Destination $installedDir -Force
+            Write-Host "PFX archiviato in: $installedDir"
+        }
+        catch {
+            Write-Warning "Impossibile archiviare PFX: $($_.Exception.Message)"
+        }
+    }
+
+    # --- Cleanup: delete password.txt after all renewals ---
     if (Test-Path $passwordFile) {
         Remove-Item -Path $passwordFile -Force -ErrorAction SilentlyContinue
         Write-Host "File password.txt eliminato."
-    }
-
-    $installedDir = Join-Path $pfxPath "installed"
-    if (-not (Test-Path $installedDir)) { New-Item -ItemType Directory -Path $installedDir -Force | Out-Null }
-    try {
-        Move-Item -Path $pfxFile -Destination $installedDir -Force
-        Write-Host "PFX archiviato in: $installedDir"
-    }
-    catch {
-        Write-Warning "Impossibile archiviare PFX: $($_.Exception.Message)"
     }
 
     if ($hadPipelineErrors) {
