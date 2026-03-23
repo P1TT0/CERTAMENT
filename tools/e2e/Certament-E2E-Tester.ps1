@@ -86,6 +86,20 @@ function Get-LiveBCThumbprint {
     return $null
 }
 
+function Get-AllBCThumbprints {
+    $map = @()
+    foreach ($inst in @(Get-NAVServerInstance)) {
+        try {
+            $t = Get-NAVServerConfiguration -ServerInstance $inst.ServerInstance `
+                 -KeyName ServicesCertificateThumbprint -ErrorAction SilentlyContinue
+            if ($t -and $t.Trim() -ne '') {
+                $map += [PSCustomObject]@{ Instance = $inst.ServerInstance; Thumbprint = $t.Trim().ToUpper() }
+            }
+        } catch {}
+    }
+    return $map
+}
+
 function Get-LiveIISThumbprint {
     param([string]$SiteName)
     try {
@@ -115,6 +129,26 @@ function Set-BCThumbprint {
             Write-Host ("    {0}: aggiornato e riavviato." -f $inst.ServerInstance) -ForegroundColor Green
         } catch {
             Write-Warning ("    {0}: errore: {1}" -f $inst.ServerInstance, $_.Exception.Message)
+        }
+    }
+}
+
+function Restore-BCThumbprints {
+    param([array]$BaselineMap)
+    foreach ($entry in $BaselineMap) {
+        try {
+            $curr = Get-NAVServerConfiguration -ServerInstance $entry.Instance `
+                    -KeyName ServicesCertificateThumbprint -ErrorAction SilentlyContinue
+            if (($curr -replace '\s','').ToUpper() -eq $entry.Thumbprint) {
+                Write-Host ("    {0}: gia al baseline." -f $entry.Instance) -ForegroundColor Gray
+                continue
+            }
+            Set-NAVServerConfiguration -ServerInstance $entry.Instance `
+                -KeyName ServicesCertificateThumbprint -KeyValue $entry.Thumbprint -ErrorAction Stop
+            Restart-NAVServerInstance -ServerInstance $entry.Instance -ErrorAction Stop
+            Write-Host ("    {0}: ripristinato a {1}" -f $entry.Instance, $entry.Thumbprint) -ForegroundColor Green
+        } catch {
+            Write-Warning ("    {0}: errore restore: {1}" -f $entry.Instance, $_.Exception.Message)
         }
     }
 }
@@ -824,11 +858,20 @@ function Invoke-RunFull {
     Import-BCModuleSafe
     Write-Ok 'Modulo BC caricato.'
 
-    # ── 3. Thumbprint baseline ───────────────────────────────
+    # ── 3. Thumbprint baseline (per-istanza) ────────────────
     Write-Phase '3/7 - Thumbprint baseline'
-    $originalThumb = Get-LiveBCThumbprint
-    if (-not $originalThumb) { throw 'Impossibile rilevare il thumbprint corrente da BC.' }
-    Write-Ok "Baseline: $originalThumb"
+    $baselineMap = @(Get-AllBCThumbprints)
+    if ($baselineMap.Count -eq 0) { throw 'Impossibile rilevare thumbprint da nessuna istanza BC.' }
+    $uniqueThumbs = @($baselineMap | Select-Object -ExpandProperty Thumbprint -Unique)
+    foreach ($entry in $baselineMap) {
+        Write-Ok ("{0} -> {1}" -f $entry.Instance, $entry.Thumbprint)
+    }
+    if ($uniqueThumbs.Count -gt 1) {
+        Write-Host "  Rilevati $($uniqueThumbs.Count) certificati distinti tra le istanze." -ForegroundColor Yellow
+    }
+    $originalThumb = $baselineMap[0].Thumbprint
+    $originalIISThumb = Get-LiveIISThumbprint -SiteName $iisSite
+    if ($originalIISThumb) { Write-Ok "IIS baseline: $originalIISThumb" }
 
     # ── 4. Password ──────────────────────────────────────────
     Write-Phase '4/7 - Password PFX test'
@@ -900,19 +943,26 @@ function Invoke-RunFull {
         Write-Host ''
         Write-Host ("  Exit code: $exitCode") -ForegroundColor $(if ($exitCode -eq 0) { 'Green' } else { 'Yellow' })
 
-        # ── 7. Verifica cambiamento ──────────────────────────────
+        # ── 7. Verifica cambiamento (per-istanza) ─────────────
         Write-Phase '7/7 - Verifica cambiamento'
         Import-BCModuleSafe
-        $newBCThumb  = Get-LiveBCThumbprint
+        $postMap = @(Get-AllBCThumbprints)
         $newIISThumb = Get-LiveIISThumbprint -SiteName $iisSite
-        $bcOk  = ($newBCThumb  -and $newBCThumb.ToUpper()  -ne $originalThumb)
-        $iisOk = ($newIISThumb -and $newIISThumb.ToUpper() -ne $originalThumb)
 
+        # Per ogni istanza che aveva il baseline, verifica che sia cambiata al test cert
+        $bcOk = $true
         Write-Host ''
-        Write-Host '  prima  -> ' -NoNewline; Write-Host $originalThumb -ForegroundColor Gray
-        Write-Host ("  BC     -> {0}  {1}" -f $newBCThumb,  (if ($bcOk)  { '[CAMBIATO OK]' } else { '[INVARIATO - TEST FALLITO]' })) `
-            -ForegroundColor $(if ($bcOk)  { 'Green' } else { 'Red' })
-        Write-Host ("  IIS    -> {0}  {1}" -f $newIISThumb, (if ($iisOk) { '[CAMBIATO OK]' } else { '[INVARIATO - TEST FALLITO]' })) `
+        foreach ($entry in $baselineMap) {
+            $post = $postMap | Where-Object { $_.Instance -eq $entry.Instance }
+            $postThumb = if ($post) { $post.Thumbprint } else { '(non trovato)' }
+            $changed = ($postThumb -ne $entry.Thumbprint)
+            if (-not $changed) { $bcOk = $false }
+            $label = if ($changed) { '[CAMBIATO OK]' } else { '[INVARIATO - TEST FALLITO]' }
+            $color = if ($changed) { 'Green' } else { 'Red' }
+            Write-Host ("  {0}: prima={1} dopo={2}  {3}" -f $entry.Instance, $entry.Thumbprint.Substring(0,12), $postThumb.Substring(0,[Math]::Min(12,$postThumb.Length)), $label) -ForegroundColor $color
+        }
+        $iisOk = ($newIISThumb -and $originalIISThumb -and $newIISThumb.ToUpper() -ne $originalIISThumb)
+        Write-Host ("  IIS    -> prima={0} dopo={1}  {2}" -f $(if ($originalIISThumb) { $originalIISThumb.Substring(0,12) } else { 'N/D' }), $(if ($newIISThumb) { $newIISThumb.Substring(0,12) } else { 'N/D' }), (if ($iisOk) { '[CAMBIATO OK]' } else { '[INVARIATO - TEST FALLITO]' })) `
             -ForegroundColor $(if ($iisOk) { 'Green' } else { 'Red' })
     }
     catch {
@@ -923,11 +973,11 @@ function Invoke-RunFull {
     finally {
         Write-Phase 'Cleanup + Ripristino garantito'
 
-        # Ripristino BC
+        # Ripristino BC (per-istanza, rispetta certificati diversi)
         Write-Host ''
-        Write-Host '  Ripristino BC...' -ForegroundColor Yellow
+        Write-Host '  Ripristino BC (per-istanza)...' -ForegroundColor Yellow
         try {
-            Set-BCThumbprint -Thumbprint $originalThumb
+            Restore-BCThumbprints -BaselineMap $baselineMap
             Write-Host '    BC ripristinato.' -ForegroundColor Green
         }
         catch {
@@ -937,7 +987,8 @@ function Invoke-RunFull {
         # Ripristino IIS
         Write-Host '  Ripristino IIS...' -ForegroundColor Yellow
         try {
-            Set-IISThumbprint -Thumbprint $originalThumb -SiteName $iisSite
+            $restoreIISThumb = if ($originalIISThumb) { $originalIISThumb } else { $originalThumb }
+            Set-IISThumbprint -Thumbprint $restoreIISThumb -SiteName $iisSite
             iisreset /restart | Out-Null
             Write-Host '    IIS reset eseguito.' -ForegroundColor Green
         }
