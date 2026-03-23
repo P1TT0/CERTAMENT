@@ -23,7 +23,7 @@ logs/
 Thumbs.db
 .DS_Store
 
-# Legacy files (pre-refactor)
+# Dev/test scripts (not part of release)
 TEST.ps1
 SENDMAILPROVA.ps1
 test.designer.ps1
@@ -33,3 +33,19 @@ Get-PfxDetails.psm1
 .diag_parse_three.ps1
 .remove_comments_emojis.ps1
 .restore_from_bak.ps1
+
+# Legacy root-level module copies (modules/ is the source of truth)
+/Get-BCThumbprint.psm1
+/Get-CertDetails.psm1
+/Get-PfxFile.psm1
+/Install-PfxCert.psm1
+/Send-Notification.psm1
+/Test-BCWebServices.psm1
+/Update-BCServiceCert.psm1
+/Update-IISBinding.psm1
+
+# Legacy TOOLKIT folder (superseded by tools/)
+TOOLKIT/
+
+# Old E2E test run archives
+tools/e2e/archive/
