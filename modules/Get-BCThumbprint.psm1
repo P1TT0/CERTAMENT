@@ -8,6 +8,16 @@ function Get-BCThumbprint {
     $thumbInstanceMap = @{}
 
     foreach ($instance in $instances) {
+        # Skip disabled services (StartupType = Disabled)
+        try {
+            $svc = Get-Service -Name $instance.ServerInstance -ErrorAction SilentlyContinue
+            if ($svc -and $svc.StartType -eq 'Disabled') {
+                Write-Host ("  Istanza {0}: servizio disabilitato, esclusa." -f $instance.ServerInstance)
+                continue
+            }
+        }
+        catch { }
+
         try {
             $thumbprint = Get-NAVServerConfiguration -ServerInstance $instance.ServerInstance -KeyName "ServicesCertificateThumbprint"
         }

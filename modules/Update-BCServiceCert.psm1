@@ -36,6 +36,18 @@ function Update-BCServiceCert {
             ErrorMessage  = $null
         }
 
+        # Skip disabled services (StartupType = Disabled)
+        try {
+            $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+            if ($svc -and $svc.StartType -eq 'Disabled') {
+                Write-Host "    Servizio disabilitato, salto."
+                $entry.Result = 'DisabledSkipped'
+                $results += $entry
+                continue
+            }
+        }
+        catch { }
+
         try {
             $currentThumb = Get-NAVServerConfiguration -ServerInstance $name -KeyName "ServicesCertificateThumbprint" -ErrorAction Stop
             $entry.PreviousThumb = $currentThumb

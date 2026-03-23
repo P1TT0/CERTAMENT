@@ -433,6 +433,14 @@ function Test-BCPostUpdate {
 
     foreach ($inst in $instances) {
         $name = $inst.ServerInstance
+
+        # Skip disabled services (StartupType = Disabled)
+        try {
+            $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+            if ($svc -and $svc.StartType -eq 'Disabled') { continue }
+        }
+        catch { }
+
         $hasThumb = $false
 
         try {
@@ -634,7 +642,7 @@ function Main {
         if ([string]::IsNullOrWhiteSpace($pfxFile)) {
             Write-Warning "Nessun file PFX trovato in $pfxPath"
             $null = Send-CustomerNotification -Title "CERTAMENT - Certificato in scadenza" `
-                -Message ("Il certificato **$($certDetails.Subject)** e' **$expiryLabel**.`nCaricare un nuovo PFX sul server **$hostname** in: **$pfxPath**") `
+                -Message ("Il certificato **$($certDetails.Subject)** e' **$expiryLabel**.`nCaricare un nuovo PFX sul server **$hostname** in: **$pfxPath**`nIncludere anche un file **password.txt** con la password del PFX nella stessa cartella.") `
                 -ContextLabel "Certificato in scadenza - PFX mancante"
             Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxMissing" -Detail ("Nessun PFX trovato in $pfxPath per $oldThumb") | Out-Null
             $hadPipelineErrors = $true
@@ -674,7 +682,7 @@ function Main {
         catch {
             Write-Warning "Errore lettura PFX: $($_.Exception.Message)"
             $null = Send-CustomerNotification -Title "CERTAMENT - Certificato in scadenza" `
-                -Message ("Il certificato **$($certDetails.Subject)** e' **$expiryLabel** ma il PFX non e' leggibile.`nVerificare che la password sia corretta.`nCaricare un nuovo PFX su **$hostname** in: **$pfxPath**") `
+                -Message ("Il certificato **$($certDetails.Subject)** e' **$expiryLabel** ma il PFX non e' leggibile.`nVerificare che la password sia corretta.`nCaricare un nuovo PFX su **$hostname** in: **$pfxPath**`nIncludere anche un file **password.txt** con la password del PFX nella stessa cartella.") `
                 -ContextLabel "Certificato in scadenza - PFX non leggibile"
             Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxUnreadable" -Detail $_.Exception.Message | Out-Null
             $hadPipelineErrors = $true
@@ -685,7 +693,7 @@ function Main {
         if ($pfxExpiry -lt (Get-Date)) {
             Write-Warning "Il PFX contiene un certificato gia' scaduto ($pfxExpiry). Non verra' installato."
             $null = Send-CustomerNotification -Title "CERTAMENT - PFX scaduto" `
-                -Message ("Il certificato **$($certDetails.Subject)** e' $expiryLabel.`nIl PFX trovato in **$pfxPath** contiene a sua volta un certificato **gia' scaduto** ($pfxExpiry).`nCaricare un PFX con un certificato valido.") `
+                -Message ("Il certificato **$($certDetails.Subject)** e' $expiryLabel.`nIl PFX trovato in **$pfxPath** contiene a sua volta un certificato **gia' scaduto** ($pfxExpiry).`nCaricare un PFX con un certificato valido.`nIncludere anche un file **password.txt** con la password del PFX nella stessa cartella.") `
                 -ContextLabel "Certificato scaduto - PFX scaduto"
             Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxExpired" -Detail "PFX trovato ma certificato gia' scaduto: $pfxExpiry" | Out-Null
             $hadPipelineErrors = $true
@@ -696,7 +704,7 @@ function Main {
         if ($pfxExpiry -le $certDetails.NotAfter -or $pfxThumb -eq $oldThumb) {
             Write-Warning "Il PFX non e' piu recente del certificato attuale."
             $null = Send-CustomerNotification -Title "CERTAMENT - PFX non aggiornato" `
-                -Message ("Il certificato **$($certDetails.Subject)** e' $expiryLabel.`nIl PFX presente in **$pfxPath** non contiene un certificato piu recente.`nCaricare un nuovo PFX aggiornato.") `
+                -Message ("Il certificato **$($certDetails.Subject)** e' $expiryLabel.`nIl PFX presente in **$pfxPath** non contiene un certificato piu recente.`nCaricare un nuovo PFX aggiornato.`nIncludere anche un file **password.txt** con la password del PFX nella stessa cartella.") `
                 -ContextLabel "Certificato scaduto - PFX non aggiornato"
             Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxNotNewer" -Detail "PFX presente ma non piu recente del certificato attuale" | Out-Null
             $hadPipelineErrors = $true
@@ -768,9 +776,11 @@ function Main {
         $iisVerifyErrors = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName
         if ($iisVerifyErrors) {
             Write-Warning "Verifica IIS fallita: $($iisVerifyErrors -join '; ')"
-            Write-Host "Retry aggiornamento IIS (con restart forzato)..."
+            # Retry WITHOUT OldThumbprint filter: if the binding has a different/unknown cert,
+            # force-update it since post-verification already confirmed it's wrong.
+            Write-Host "Retry aggiornamento IIS (senza filtro OldThumbprint, con restart forzato)..."
             try {
-                $iisRetry = Update-IISBinding -NewThumbprint $newThumb -OldThumbprint $oldThumb -SiteName $iisSiteName -RestartIIS
+                $iisRetry = Update-IISBinding -NewThumbprint $newThumb -SiteName $iisSiteName -RestartIIS
                 if ($iisRetry) { $iisRetry | Format-Table -AutoSize }
             }
             catch {
