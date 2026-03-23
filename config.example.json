@@ -4,8 +4,7 @@
   },
   "Pfx": {
     "Path": "C:\\_install",
-    "Password": "",
-    "AutoSelectLatest": true
+    "Password": ""
   },
   "BusinessCentral": {
     "UseLatestModule": true

@@ -21,6 +21,30 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 }
 
 # ============================================================
+# Single-instance guard (named mutex)
+# ============================================================
+$mutexName = 'Global\CERTAMENT_SingleInstance'
+$script:mutex = $null
+try {
+    $script:mutex = [System.Threading.Mutex]::new($false, $mutexName)
+}
+catch {
+    Write-Error "Impossibile creare mutex: $($_.Exception.Message)"
+    exit 1
+}
+
+if (-not $script:mutex.WaitOne(0)) {
+    Write-Warning "Un'altra istanza di CERTAMENT e' gia' in esecuzione. Uscita."
+    $script:mutex.Dispose()
+    exit 0
+}
+
+# Release mutex on exit (normal, error, or Ctrl+C)
+Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
+    if ($script:mutex) { try { $script:mutex.ReleaseMutex(); $script:mutex.Dispose() } catch { } }
+} | Out-Null
+
+# ============================================================
 # Configuration
 # ============================================================
 $configPath = Join-Path $PSScriptRoot "config.json"
@@ -37,6 +61,8 @@ $config = $configRaw | ConvertFrom-Json
 # ============================================================
 # Logging
 # ============================================================
+$loggingEnabled = -not ($config.Logging -and $config.Logging.PSObject.Properties['Enabled'] -and $config.Logging.Enabled -eq $false)
+
 $logPath = if ($config.Logging -and -not [string]::IsNullOrWhiteSpace([string]$config.Logging.Path)) {
     [string]$config.Logging.Path
 }
@@ -47,8 +73,10 @@ else {
 $logDir = Join-Path $PSScriptRoot $logPath
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
-$logFile = Join-Path $logDir ("certament_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
-Start-Transcript -Path $logFile -Append | Out-Null
+if ($loggingEnabled) {
+    $logFile = Join-Path $logDir ("certament_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    Start-Transcript -Path $logFile -Append | Out-Null
+}
 
 # Clean old logs
 if ($config.Logging.RetentionDays) {
@@ -886,4 +914,5 @@ catch {
 }
 finally {
     try { Stop-Transcript | Out-Null } catch {}
+    try { if ($script:mutex) { $script:mutex.ReleaseMutex(); $script:mutex.Dispose() } } catch {}
 }

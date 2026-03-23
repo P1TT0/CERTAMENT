@@ -237,6 +237,14 @@ function Test-BCPostUpdate {
 
     foreach ($instance in @(Get-NAVServerInstance)) {
         $name = $instance.ServerInstance
+
+        # Skip disabled services (StartupType = Disabled)
+        try {
+            $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+            if ($svc -and $svc.StartType -eq 'Disabled') { continue }
+        }
+        catch { }
+
         $hasThumb = $false
 
         try {
@@ -418,19 +426,8 @@ if ($bcResults) { $bcResults | Format-Table -AutoSize }
 
 Write-Host ''
 Write-Host 'Aggiornamento IIS...' -ForegroundColor Cyan
-$iisResults = Update-IISBinding -NewThumbprint $selected.Thumbprint -SiteName $iisSiteName
+$iisResults = Update-IISBinding -NewThumbprint $selected.Thumbprint -SiteName $iisSiteName -RestartIIS:$restartIIS
 if ($iisResults) { $iisResults | Format-Table -AutoSize }
-
-$iisUpdated = $false
-if ($iisResults) {
-    $iisUpdated = (@($iisResults | Where-Object { $_.Updated -eq $true })).Count -gt 0
-}
-
-if ($restartIIS -and $iisUpdated) {
-    Write-Host 'Riavvio IIS...' -ForegroundColor Cyan
-    iisreset /noforce | Out-Null
-    Write-Host 'IIS riavviato.' -ForegroundColor Green
-}
 
 Write-Host ''
 Write-Host 'Verifica finale...' -ForegroundColor Cyan
