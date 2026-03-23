@@ -1,33 +1,44 @@
 <#
 .SYNOPSIS
-    CERTAMENT E2E Tester - testa il ciclo di aggiornamento certificati e le singole funzionalita'.
+    CERTAMENT E2E Tester - test di scenario per il ciclo di aggiornamento certificati.
 .DESCRIPTION
-    RunFull          : test completo del ciclo di rinnovo certificato (default).
-    TestNotification : testa l'invio notifiche webhook (Customer e/o Internal).
-    TestHeartbeat    : testa la connettivita' heartbeat Azure.
-    TestModules      : verifica che tutti i moduli CERTAMENT si importino e le funzioni esistano.
-    TestExpiredPfx   : verifica che la pipeline rifiuti un PFX scaduto.
-    TestNoPfx        : verifica il comportamento con drop folder vuoto.
-    TestConfig       : valida la configurazione config.json.
-    TestCertStore    : mostra i certificati nello store e verifica coerenza con BC/IIS.
-    Status           : mostra lo stato corrente (task, BC/IIS thumbprint, drop folder).
-    Restore          : ripristino di emergenza BC/IIS al certificato originale.
-    RunAll           : esegue tutti i test in sequenza (escluso RunFull e Restore).
-    Help             : mostra questo messaggio.
+    Crea ambienti di test specifici, esegue CERTAMENT e verifica il comportamento.
+
+    SCENARI (creano ambiente, eseguono CERTAMENT, verificano risultato):
+      RunScenarios       : esegue tutti gli scenari in sequenza (default).
+      ScenarioRenew      : tutti i servizi con cert scaduto + PFX valido -> aggiornamento completo.
+      ScenarioMixed      : servizi con cert diversi (uno scaduto, uno valido) -> solo scaduti aggiornati.
+      ScenarioNoCert     : servizio senza cert + servizi con cert scaduto -> salta quello senza cert.
+      ScenarioNoPfx      : cert in scadenza senza PFX -> notifica, nessun cambiamento.
+      ScenarioExpiredPfx : cert in scadenza + PFX scaduto -> rifiuta PFX, nessun cambiamento.
+      ScenarioAllValid   : tutti i cert validi -> nessuna azione, exit 0.
+
+    VERIFICHE (non modificano l'ambiente):
+      TestConfig         : valida config.json.
+      TestModules        : verifica importazione moduli.
+      TestNotification   : testa invio webhook.
+      TestHeartbeat      : testa connettivita' heartbeat Azure.
+      TestCertStore      : verifica coerenza cert store / BC / IIS.
+      RunAll             : esegue tutte le verifiche non distruttive.
+
+    UTILITA':
+      Status             : mostra stato corrente (task, thumbprint, drop folder).
+      Restore            : ripristino emergenza BC/IIS al certificato originale.
+      Help               : mostra questo messaggio.
 .EXAMPLE
     .\Certament-E2E-Tester.ps1
-    .\Certament-E2E-Tester.ps1 -SecretFilePath C:\temp\pfxpwd.txt
-    .\Certament-E2E-Tester.ps1 -Action TestNotification
-    .\Certament-E2E-Tester.ps1 -Action TestModules
+    .\Certament-E2E-Tester.ps1 -Action ScenarioMixed -SecretFilePath C:\temp\pfxpwd.txt
+    .\Certament-E2E-Tester.ps1 -Action TestConfig
     .\Certament-E2E-Tester.ps1 -Action RunAll
     .\Certament-E2E-Tester.ps1 -Action Status
-    .\Certament-E2E-Tester.ps1 -Action Restore
 #>
 param(
-    [ValidateSet('RunFull', 'TestNotification', 'TestHeartbeat', 'TestModules',
-                 'TestExpiredPfx', 'TestNoPfx', 'TestConfig', 'TestCertStore',
-                 'Status', 'Restore', 'RunAll', 'Help')]
-    [string]$Action = 'RunFull',
+    [ValidateSet(
+        'RunScenarios', 'ScenarioRenew', 'ScenarioMixed', 'ScenarioNoCert',
+        'ScenarioNoPfx', 'ScenarioExpiredPfx', 'ScenarioAllValid',
+        'TestConfig', 'TestModules', 'TestNotification', 'TestHeartbeat', 'TestCertStore',
+        'RunAll', 'Status', 'Restore', 'Help')]
+    [string]$Action = 'RunScenarios',
 
     # Cartella di installazione CERTAMENT
     [string]$InstallRoot = 'C:\CERTAMENT',
@@ -153,6 +164,21 @@ function Restore-BCThumbprints {
     }
 }
 
+function Set-BCInstanceThumbprint {
+    param(
+        [string]$Instance,
+        [string]$Thumbprint,
+        [switch]$NoRestart
+    )
+    $norm = if ($Thumbprint) { $Thumbprint.ToUpper() } else { '' }
+    Set-NAVServerConfiguration -ServerInstance $Instance `
+        -KeyName ServicesCertificateThumbprint -KeyValue $norm -ErrorAction Stop
+    if (-not $NoRestart) {
+        Restart-NAVServerInstance -ServerInstance $Instance -ErrorAction Stop
+    }
+    Write-Host ("    {0} -> {1}" -f $Instance, $(if ($norm) { $norm } else { '(vuoto)' })) -ForegroundColor Green
+}
+
 function Set-IISThumbprint {
     param([string]$Thumbprint, [string]$SiteName)
     $norm = $Thumbprint.ToUpper()
@@ -217,6 +243,131 @@ function Import-CertamentModules {
     @('Get-BCThumbprint','Get-CertDetails','Get-PfxFile','Install-PfxCert',
       'Update-BCServiceCert','Update-IISBinding','Test-BCWebServices','Send-Notification') |
         ForEach-Object { Import-Module (Join-Path $moduleDir "$_.psm1") -Force }
+}
+
+# =============================================================
+# Scenario framework helpers
+# =============================================================
+
+function Resolve-PfxPassword {
+    if ($script:PfxPasswordResolved) { return $script:PfxPasswordResolved }
+    if (-not [string]::IsNullOrWhiteSpace($SecretFilePath) -and (Test-Path $SecretFilePath)) {
+        $script:PfxPasswordResolved = (Get-Content $SecretFilePath -Raw).Trim()
+    }
+    else {
+        $secure = Read-Host 'Password per i PFX di test' -AsSecureString
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+        try { $script:PfxPasswordResolved = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) }
+        finally { if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) } }
+    }
+    if ([string]::IsNullOrWhiteSpace($script:PfxPasswordResolved)) { throw 'Password non fornita.' }
+    return $script:PfxPasswordResolved
+}
+
+function Save-TestBaseline {
+    Import-BCModuleSafe
+    $map = @(Get-AllBCThumbprints)
+    $cfg, $configPath = Read-CertamentConfig
+    $iisSite = if ($cfg.IIS -and $cfg.IIS.SiteName) { $cfg.IIS.SiteName } `
+               else { 'Microsoft Dynamics 365 Business Central Web Client' }
+    $iisThumb = Get-LiveIISThumbprint -SiteName $iisSite
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $configBackup = "$configPath.e2e_backup_$stamp"
+    $configOriginalRaw = Get-Content $configPath -Raw
+    Copy-Item $configPath $configBackup -Force
+
+    return @{
+        BCMap             = $map
+        IISThumb          = $iisThumb
+        IISSite           = $iisSite
+        Config            = $cfg
+        ConfigPath        = $configPath
+        ConfigBackup      = $configBackup
+        ConfigOriginalRaw = $configOriginalRaw
+        Stamp             = $stamp
+        PfxDrop           = $cfg.Pfx.Path
+        MainScript        = Join-Path $InstallRoot '_MAINCertManager.ps1'
+        TestCerts         = @()
+        TestFiles         = @()
+        StashedFiles      = @()
+    }
+}
+
+function Restore-TestBaseline {
+    param([hashtable]$BL)
+    Write-Phase 'Ripristino'
+
+    # BC per-istanza
+    try {
+        Restore-BCThumbprints -BaselineMap $BL.BCMap
+        Write-Host '    BC ripristinato.' -ForegroundColor Green
+    } catch { Write-Warning "    BC restore: $($_.Exception.Message)" }
+
+    # IIS
+    if ($BL.IISThumb) {
+        try {
+            Set-IISThumbprint -Thumbprint $BL.IISThumb -SiteName $BL.IISSite
+            iisreset /restart 2>&1 | Out-Null
+            Write-Host '    IIS ripristinato.' -ForegroundColor Green
+        } catch { Write-Warning "    IIS restore: $($_.Exception.Message)" }
+    }
+
+    # Config
+    if ($BL.ConfigBackup -and (Test-Path $BL.ConfigBackup)) {
+        Copy-Item $BL.ConfigBackup $BL.ConfigPath -Force
+        Remove-Item $BL.ConfigBackup -Force -ErrorAction SilentlyContinue
+        Write-Host '    Config ripristinato.' -ForegroundColor Green
+    }
+    elseif ($BL.ConfigOriginalRaw) {
+        Set-Content $BL.ConfigPath -Value $BL.ConfigOriginalRaw -Encoding UTF8
+    }
+
+    # Cleanup test certs
+    foreach ($t in $BL.TestCerts) {
+        Remove-Item "Cert:\LocalMachine\My\$t" -Force -ErrorAction SilentlyContinue
+    }
+
+    # Cleanup test files
+    foreach ($f in $BL.TestFiles) {
+        if (Test-Path $f) { Remove-Item $f -Force -ErrorAction SilentlyContinue }
+    }
+
+    # Restore stashed files
+    foreach ($s in $BL.StashedFiles) {
+        if (Test-Path $s.Temp) { Move-Item $s.Temp $s.Original -Force -ErrorAction SilentlyContinue }
+    }
+
+    # Clean password.txt
+    $pwdFile = Join-Path $BL.PfxDrop 'password.txt'
+    if (Test-Path $pwdFile) { Remove-Item $pwdFile -Force -ErrorAction SilentlyContinue }
+
+    # Clean archived E2E PFX
+    $archiveDir = Join-Path $BL.PfxDrop 'installed'
+    if (Test-Path $archiveDir) {
+        Get-ChildItem $archiveDir -Filter 'E2E_*' -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-Ok 'Ripristino completato.'
+}
+
+function Set-TestConfig {
+    param([hashtable]$BL, [int]$NotifyBeforeDays)
+    $cfgObj = $BL.ConfigOriginalRaw | ConvertFrom-Json
+    $cfgObj.Notifications.CertificateExpiry.NotifyBeforeDays = $NotifyBeforeDays
+    $cfgObj | ConvertTo-Json -Depth 10 | Set-Content $BL.ConfigPath -Encoding UTF8
+    Write-Ok "NotifyBeforeDays = $NotifyBeforeDays"
+}
+
+function Invoke-CertamentProcess {
+    param([string]$MainScript)
+    Write-Phase 'Esecuzione CERTAMENT'
+    Write-Host ''
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $MainScript
+    $code = $LASTEXITCODE
+    Write-Host ''
+    Write-Host ("  Exit code: $code") -ForegroundColor $(if ($code -eq 0) { 'Green' } else { 'Yellow' })
+    return $code
 }
 
 # =============================================================
@@ -441,190 +592,6 @@ function Invoke-TestHeartbeat {
 }
 
 # =============================================================
-# Action: TestExpiredPfx
-# =============================================================
-function Invoke-TestExpiredPfx {
-    Assert-Admin
-    Write-Phase 'TEST EXPIRED PFX REJECTION'
-    $script:TestResults.Clear()
-
-    $cfg, $configPath = Read-CertamentConfig
-    $pfxDrop = $cfg.Pfx.Path
-    $mainScript = Join-Path $InstallRoot '_MAINCertManager.ps1'
-
-    Add-TestResult -Name 'Main script exists' -Passed (Test-Path $mainScript)
-    Add-TestResult -Name 'Drop folder exists' -Passed (Test-Path $pfxDrop) -Detail $pfxDrop
-    if (-not (Test-Path $mainScript) -or -not (Test-Path $pfxDrop)) { Show-TestSummary; return }
-
-    # Get password
-    $secretPlain = $null
-    if (-not [string]::IsNullOrWhiteSpace($SecretFilePath) -and (Test-Path $SecretFilePath)) {
-        $secretPlain = (Get-Content $SecretFilePath -Raw).Trim()
-    }
-    else {
-        $secure = Read-Host 'Password per il PFX di test' -AsSecureString
-        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-        try { $secretPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) }
-        finally { if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) } }
-    }
-    if ([string]::IsNullOrWhiteSpace($secretPlain)) { throw 'Password non fornita.' }
-
-    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $testPfxTemp = $null
-    $destPfx = $null
-    $destPwd = $null
-    $configBackup = $null
-    $configOriginalRaw = $null
-
-    try {
-        # Create an EXPIRED self-signed cert
-        $testCert = New-SelfSignedCertificate -DnsName 'certament.e2e.expired' `
-            -CertStoreLocation 'Cert:\LocalMachine\My' `
-            -NotBefore (Get-Date).AddYears(-2) `
-            -NotAfter (Get-Date).AddDays(-1) `
-            -FriendlyName "CERTAMENT E2E EXPIRED $stamp" `
-            -KeyExportPolicy Exportable -KeySpec KeyExchange -KeyLength 2048
-        $expiredThumb = $testCert.Thumbprint.ToUpper()
-        Add-TestResult -Name 'Expired test cert created' -Passed $true -Detail "Thumb: $expiredThumb"
-
-        # Export to PFX
-        $testPfxTemp = Join-Path $env:TEMP ("CERTAMENT_E2E_EXP_{0}.pfx" -f $stamp)
-        $securePwd = ConvertTo-SecureString $secretPlain -AsPlainText -Force
-        Export-PfxCertificate -Cert $testCert -FilePath $testPfxTemp -Password $securePwd | Out-Null
-
-        # Drop into PFX folder
-        $destPfx = Join-Path $pfxDrop ("E2E_EXPIRED_{0}.pfx" -f $stamp)
-        $destPwd = Join-Path $pfxDrop 'password.txt'
-        Copy-Item $testPfxTemp $destPfx -Force
-        Set-Content $destPwd -Value $secretPlain -Encoding UTF8 -NoNewline
-
-        # Backup config and set threshold to force
-        $configBackup = "$configPath.e2e_backup_$stamp"
-        $configOriginalRaw = Get-Content $configPath -Raw
-        Copy-Item $configPath $configBackup -Force
-        $cfgObj = $configOriginalRaw | ConvertFrom-Json
-        $cfgObj.Notifications.CertificateExpiry.NotifyBeforeDays = 9999
-        $cfgObj | ConvertTo-Json -Depth 10 | Set-Content $configPath -Encoding UTF8
-
-        # Run CERTAMENT - it SHOULD reject the expired PFX (exit 1, not crash)
-        Write-Host '  Running CERTAMENT with expired PFX...'
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $mainScript
-        $exitCode = $LASTEXITCODE
-
-        # Verify BC thumbprint was NOT changed
-        Import-BCModuleSafe
-        $currentThumb = Get-LiveBCThumbprint
-        $notChanged = ($null -eq $currentThumb) -or ($currentThumb -ne $expiredThumb)
-        Add-TestResult -Name 'Expired PFX rejected (not installed to BC)' -Passed $notChanged `
-            -Detail "BC thumb: $currentThumb, expired: $expiredThumb"
-        Add-TestResult -Name 'CERTAMENT exit code non-zero' -Passed ($exitCode -ne 0) `
-            -Detail "Exit code: $exitCode"
-    }
-    finally {
-        # Cleanup
-        if ($configBackup -and (Test-Path $configBackup)) {
-            Copy-Item $configBackup $configPath -Force
-            Remove-Item $configBackup -Force -ErrorAction SilentlyContinue
-        }
-        elseif ($configOriginalRaw) {
-            Set-Content $configPath -Value $configOriginalRaw -Encoding UTF8
-        }
-        if ($testPfxTemp -and (Test-Path $testPfxTemp)) { Remove-Item $testPfxTemp -Force -ErrorAction SilentlyContinue }
-        if ($destPfx -and (Test-Path $destPfx)) { Remove-Item $destPfx -Force -ErrorAction SilentlyContinue }
-        if ($destPwd -and (Test-Path $destPwd)) { Remove-Item $destPwd -Force -ErrorAction SilentlyContinue }
-        if ($expiredThumb) { Remove-Item "Cert:\LocalMachine\My\$expiredThumb" -Force -ErrorAction SilentlyContinue }
-        # Clean up any archived test PFX
-        $archiveDir = Join-Path $pfxDrop 'installed'
-        if (Test-Path $archiveDir) {
-            Get-ChildItem $archiveDir -Filter "E2E_EXPIRED_*" -ErrorAction SilentlyContinue |
-                Remove-Item -Force -ErrorAction SilentlyContinue
-        }
-    }
-
-    Show-TestSummary
-}
-
-# =============================================================
-# Action: TestNoPfx
-# =============================================================
-function Invoke-TestNoPfx {
-    Assert-Admin
-    Write-Phase 'TEST NO PFX (EMPTY DROP FOLDER)'
-    $script:TestResults.Clear()
-
-    $cfg, $configPath = Read-CertamentConfig
-    $pfxDrop = $cfg.Pfx.Path
-    $mainScript = Join-Path $InstallRoot '_MAINCertManager.ps1'
-
-    Add-TestResult -Name 'Main script exists' -Passed (Test-Path $mainScript)
-    if (-not (Test-Path $mainScript)) { Show-TestSummary; return }
-
-    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $configBackup = $null
-    $configOriginalRaw = $null
-    $movedPfxFiles = @()
-
-    try {
-        # Backup config
-        $configBackup = "$configPath.e2e_backup_$stamp"
-        $configOriginalRaw = Get-Content $configPath -Raw
-        Copy-Item $configPath $configBackup -Force
-        $cfgObj = $configOriginalRaw | ConvertFrom-Json
-        $cfgObj.Notifications.CertificateExpiry.NotifyBeforeDays = 9999
-        $cfgObj | ConvertTo-Json -Depth 10 | Set-Content $configPath -Encoding UTF8
-
-        # Temporarily move any existing PFX files out of drop folder
-        $existingPfx = @(Get-ChildItem $pfxDrop -Filter '*.pfx' -File -ErrorAction SilentlyContinue)
-        foreach ($pf in $existingPfx) {
-            $tempDest = Join-Path $env:TEMP ("E2E_STASH_{0}_{1}" -f $stamp, $pf.Name)
-            Move-Item $pf.FullName $tempDest -Force
-            $movedPfxFiles += [PSCustomObject]@{ Original = $pf.FullName; Temp = $tempDest }
-        }
-
-        # Remove password.txt temporarily
-        $pwdFile = Join-Path $pfxDrop 'password.txt'
-        $pwdBackup = $null
-        if (Test-Path $pwdFile) {
-            $pwdBackup = Join-Path $env:TEMP ("E2E_STASH_{0}_password.txt" -f $stamp)
-            Move-Item $pwdFile $pwdBackup -Force
-        }
-
-        Add-TestResult -Name 'Drop folder emptied' -Passed $true `
-            -Detail "$($existingPfx.Count) PFX stashed"
-
-        # Run CERTAMENT - should report no PFX, not crash
-        Write-Host '  Running CERTAMENT with empty drop folder...'
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $mainScript
-        $exitCode = $LASTEXITCODE
-
-        Add-TestResult -Name 'CERTAMENT handled missing PFX gracefully' -Passed ($exitCode -ne $null) `
-            -Detail "Exit code: $exitCode"
-    }
-    finally {
-        # Restore stashed PFX files
-        foreach ($stash in $movedPfxFiles) {
-            if (Test-Path $stash.Temp) {
-                Move-Item $stash.Temp $stash.Original -Force -ErrorAction SilentlyContinue
-            }
-        }
-        # Restore password.txt
-        if ($pwdBackup -and (Test-Path $pwdBackup)) {
-            Move-Item $pwdBackup $pwdFile -Force -ErrorAction SilentlyContinue
-        }
-        # Restore config
-        if ($configBackup -and (Test-Path $configBackup)) {
-            Copy-Item $configBackup $configPath -Force
-            Remove-Item $configBackup -Force -ErrorAction SilentlyContinue
-        }
-        elseif ($configOriginalRaw) {
-            Set-Content $configPath -Value $configOriginalRaw -Encoding UTF8
-        }
-    }
-
-    Show-TestSummary
-}
-
-# =============================================================
 # Action: TestCertStore
 # =============================================================
 function Invoke-TestCertStore {
@@ -831,229 +798,608 @@ function Invoke-Restore {
 }
 
 # =============================================================
-# Action: RunFull (default)
+# SCENARI - creano ambiente -> eseguono CERTAMENT -> verificano
 # =============================================================
-function Invoke-RunFull {
+
+# ----- ScenarioRenew -----
+# Tutti i servizi hanno lo stesso certificato in scadenza.
+# PFX valido nella drop folder.
+# Atteso: tutti i servizi aggiornati al nuovo certificato.
+function Invoke-ScenarioRenew {
     Assert-Admin
+    $script:TestResults.Clear()
+    Write-Phase 'SCENARIO: Rinnovo completo'
+    Write-Host '  Tutti i servizi con lo stesso cert scaduto + PFX valido.'
+    Write-Host '  Atteso: tutti aggiornati, IIS aggiornato, exit 0.'
 
-    Write-Host ''
-    Write-Host '+--------------------------------------------------+' -ForegroundColor Cyan
-    Write-Host '|    CERTAMENT E2E TEST - esecuzione completa      |' -ForegroundColor Cyan
-    Write-Host '+--------------------------------------------------+' -ForegroundColor Cyan
+    $bl = Save-TestBaseline
+    if ($bl.BCMap.Count -eq 0) { throw 'Nessuna istanza BC trovata.' }
+    if (-not (Test-Path $bl.MainScript)) { throw "_MAINCertManager.ps1 non trovato." }
 
-    # ── 1. Leggi config ──────────────────────────────────────
-    Write-Phase '1/7 - Lettura config'
-    $cfg, $configPath = Read-CertamentConfig
-    $pfxDrop    = $cfg.Pfx.Path
-    $iisSite    = if ($cfg.IIS -and $cfg.IIS.SiteName) { $cfg.IIS.SiteName } `
-                  else { 'Microsoft Dynamics 365 Business Central Web Client' }
-    $mainScript = Join-Path $InstallRoot '_MAINCertManager.ps1'
-    if (-not (Test-Path $mainScript)) { throw "_MAINCertManager.ps1 non trovato in $InstallRoot" }
-    Write-Ok "Drop  : $pfxDrop"
-    Write-Ok "IIS   : $iisSite"
-    Write-Ok "Script: $mainScript"
-
-    # ── 2. Modulo BC ─────────────────────────────────────────
-    Write-Phase '2/7 - Modulo BC'
-    Import-BCModuleSafe
-    Write-Ok 'Modulo BC caricato.'
-
-    # ── 3. Thumbprint baseline (per-istanza) ────────────────
-    Write-Phase '3/7 - Thumbprint baseline'
-    $baselineMap = @(Get-AllBCThumbprints)
-    if ($baselineMap.Count -eq 0) { throw 'Impossibile rilevare thumbprint da nessuna istanza BC.' }
-    $uniqueThumbs = @($baselineMap | Select-Object -ExpandProperty Thumbprint -Unique)
-    foreach ($entry in $baselineMap) {
-        Write-Ok ("{0} -> {1}" -f $entry.Instance, $entry.Thumbprint)
-    }
-    if ($uniqueThumbs.Count -gt 1) {
-        Write-Host "  Rilevati $($uniqueThumbs.Count) certificati distinti tra le istanze." -ForegroundColor Yellow
-    }
-    $originalThumb = $baselineMap[0].Thumbprint
-    $originalIISThumb = Get-LiveIISThumbprint -SiteName $iisSite
-    if ($originalIISThumb) { Write-Ok "IIS baseline: $originalIISThumb" }
-
-    # ── 4. Password ──────────────────────────────────────────
-    Write-Phase '4/7 - Password PFX test'
-    if (-not [string]::IsNullOrWhiteSpace($SecretFilePath) -and (Test-Path $SecretFilePath)) {
-        $secretPlain = (Get-Content $SecretFilePath -Raw).Trim()
-        Write-Ok "Password letta da: $SecretFilePath"
-    } else {
-        $secure = Read-Host 'Password per il PFX di test' -AsSecureString
-        $bstr   = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-        try     { $secretPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) }
-        finally { if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) } }
-    }
-    if ([string]::IsNullOrWhiteSpace($secretPlain)) { throw 'Password non fornita.' }
-
-    $configBackup = $null
-    $configOriginalRaw = $null
-    $testPfxTemp = $null
-    $destPfx = $null
-    $destPwd = $null
-    $testThumb = $null
-    $newBCThumb = $null
-    $newIISThumb = $null
-    $bcOk = $false
-    $iisOk = $false
-    $configRestored = $false
-    $runError = $null
+    $pwd = Resolve-PfxPassword
+    $securePwd = ConvertTo-SecureString $pwd -AsPlainText -Force
 
     try {
-        # ── 5. Preparazione ──────────────────────────────────────
-        Write-Phase '5/7 - Preparazione'
-        $stamp        = Get-Date -Format 'yyyyMMdd_HHmmss'
-        $configBackup = "$configPath.e2e_backup_$stamp"
-        $configOriginalRaw = Get-Content $configPath -Raw
-        Copy-Item $configPath $configBackup -Force
-        Write-Ok "Config backup: $configBackup"
+        Write-Phase 'Setup ambiente'
 
-        $cfgObj = $configOriginalRaw | ConvertFrom-Json
-        $cfgObj.Notifications.CertificateExpiry.NotifyBeforeDays = 9999
-        $cfgObj | ConvertTo-Json -Depth 10 | Set-Content $configPath -Encoding UTF8
-        Write-Ok 'NotifyBeforeDays = 9999 (forza aggiornamento).'
+        # Cert A: scadenza prossima (5 giorni)
+        $certA = New-SelfSignedCertificate -DnsName 'certament.e2e.expiring' `
+            -CertStoreLocation 'Cert:\LocalMachine\My' `
+            -NotAfter (Get-Date).AddDays(5) `
+            -FriendlyName "E2E Expiring $($bl.Stamp)" `
+            -KeyExportPolicy Exportable -KeySpec KeyExchange -KeyLength 2048
+        $bl.TestCerts += $certA.Thumbprint.ToUpper()
+        Write-Ok "Cert scaduto: $($certA.Thumbprint.Substring(0,12))... (5gg)"
 
-        # Crea cert self-signed + PFX
-        $testPfxTemp = Join-Path $env:TEMP ("CERTAMENT_E2E_{0}.pfx" -f $stamp)
-        $notAfter    = (Get-Date).AddYears(3)
-        $testCert    = New-SelfSignedCertificate -DnsName 'certament.e2e.test' `
-                           -CertStoreLocation 'Cert:\LocalMachine\My' `
-                           -NotAfter $notAfter `
-                           -FriendlyName "CERTAMENT E2E $stamp" `
-                           -KeyExportPolicy Exportable -KeySpec KeyExchange -KeyLength 2048
-        $securePwd   = ConvertTo-SecureString $secretPlain -AsPlainText -Force
-        Export-PfxCertificate -Cert $testCert -FilePath $testPfxTemp -Password $securePwd | Out-Null
-        $testThumb   = $testCert.Thumbprint.ToUpper()
-        Write-Ok "Cert test: $testThumb"
-        Write-Ok "Scadenza : $($notAfter.ToString('yyyy-MM-dd'))"
+        # Cert R: sostituzione (3 anni) - esportato come PFX
+        $certR = New-SelfSignedCertificate -DnsName 'certament.e2e.replacement' `
+            -CertStoreLocation 'Cert:\LocalMachine\My' `
+            -NotAfter (Get-Date).AddYears(3) `
+            -FriendlyName "E2E Replacement $($bl.Stamp)" `
+            -KeyExportPolicy Exportable -KeySpec KeyExchange -KeyLength 2048
+        $bl.TestCerts += $certR.Thumbprint.ToUpper()
+        $expectedThumb = $certR.Thumbprint.ToUpper()
+        Write-Ok "Cert sostituzione: $($expectedThumb.Substring(0,12))... (3 anni)"
 
-        # Drop PFX + password.txt
-        $destPfx = Join-Path $pfxDrop ("E2E_TEST_{0}.pfx" -f $stamp)
-        $destPwd = Join-Path $pfxDrop 'password.txt'
-        Copy-Item $testPfxTemp $destPfx -Force
-        Set-Content $destPwd -Value $secretPlain -Encoding UTF8 -NoNewline
-        Write-Ok "PFX in drop: $destPfx"
-        Write-Ok 'password.txt creata.'
+        # Esporta PFX e deposita nella drop folder
+        $pfxFile = Join-Path $bl.PfxDrop ("E2E_RENEW_{0}.pfx" -f $bl.Stamp)
+        Export-PfxCertificate -Cert $certR -FilePath $pfxFile -Password $securePwd | Out-Null
+        $bl.TestFiles += $pfxFile
+        Set-Content (Join-Path $bl.PfxDrop 'password.txt') -Value $pwd -Encoding UTF8 -NoNewline
+        Write-Ok "PFX depositato: $pfxFile"
 
-        # ── 6. Esecuzione CERTAMENT ──────────────────────────────
-        Write-Phase '6/7 - Esecuzione CERTAMENT'
-        Write-Host ''
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $mainScript
-        $exitCode = $LASTEXITCODE
-        Write-Host ''
-        Write-Host ("  Exit code: $exitCode") -ForegroundColor $(if ($exitCode -eq 0) { 'Green' } else { 'Yellow' })
+        # Imposta tutti i servizi BC al cert scaduto (senza restart - basta il config)
+        Write-Host '  Configurazione istanze BC...'
+        foreach ($entry in $bl.BCMap) {
+            Set-BCInstanceThumbprint -Instance $entry.Instance -Thumbprint $certA.Thumbprint.ToUpper() -NoRestart
+        }
 
-        # ── 7. Verifica cambiamento (per-istanza) ─────────────
-        Write-Phase '7/7 - Verifica cambiamento'
+        # Imposta IIS al cert scaduto
+        Set-IISThumbprint -Thumbprint $certA.Thumbprint.ToUpper() -SiteName $bl.IISSite
+
+        # Config: NotifyBeforeDays = 30 (cert A ha 5gg -> scaduto)
+        Set-TestConfig -BL $bl -NotifyBeforeDays 30
+
+        # Esegui CERTAMENT
+        $exitCode = Invoke-CertamentProcess -MainScript $bl.MainScript
+
+        # Verifica
+        Write-Phase 'Verifica risultati'
         Import-BCModuleSafe
         $postMap = @(Get-AllBCThumbprints)
-        $newIISThumb = Get-LiveIISThumbprint -SiteName $iisSite
+        $postIIS = Get-LiveIISThumbprint -SiteName $bl.IISSite
 
-        # Per ogni istanza che aveva il baseline, verifica che sia cambiata al test cert
-        $bcOk = $true
-        Write-Host ''
-        foreach ($entry in $baselineMap) {
+        foreach ($entry in $bl.BCMap) {
             $post = $postMap | Where-Object { $_.Instance -eq $entry.Instance }
-            $postThumb = if ($post) { $post.Thumbprint } else { '(non trovato)' }
-            $changed = ($postThumb -ne $entry.Thumbprint)
-            if (-not $changed) { $bcOk = $false }
-            $label = if ($changed) { '[CAMBIATO OK]' } else { '[INVARIATO - TEST FALLITO]' }
-            $color = if ($changed) { 'Green' } else { 'Red' }
-            Write-Host ("  {0}: prima={1} dopo={2}  {3}" -f $entry.Instance, $entry.Thumbprint.Substring(0,12), $postThumb.Substring(0,[Math]::Min(12,$postThumb.Length)), $label) -ForegroundColor $color
+            $postThumb = if ($post) { $post.Thumbprint } else { '' }
+            $ok = ($postThumb -eq $expectedThumb)
+            Add-TestResult -Name "BC $($entry.Instance) aggiornata" -Passed $ok `
+                -Detail "atteso=$($expectedThumb.Substring(0,12)) dopo=$(if ($postThumb) { $postThumb.Substring(0,12) } else { 'N/D' })"
         }
-        $iisOk = ($newIISThumb -and $originalIISThumb -and $newIISThumb.ToUpper() -ne $originalIISThumb)
-        Write-Host ("  IIS    -> prima={0} dopo={1}  {2}" -f $(if ($originalIISThumb) { $originalIISThumb.Substring(0,12) } else { 'N/D' }), $(if ($newIISThumb) { $newIISThumb.Substring(0,12) } else { 'N/D' }), (if ($iisOk) { '[CAMBIATO OK]' } else { '[INVARIATO - TEST FALLITO]' })) `
-            -ForegroundColor $(if ($iisOk) { 'Green' } else { 'Red' })
+        Add-TestResult -Name 'IIS aggiornato' -Passed ($postIIS -eq $expectedThumb) `
+            -Detail "atteso=$($expectedThumb.Substring(0,12)) dopo=$(if ($postIIS) { $postIIS.Substring(0,12) } else { 'N/D' })"
+        Add-TestResult -Name 'Exit code = 0' -Passed ($exitCode -eq 0) -Detail "code=$exitCode"
     }
     catch {
-        $runError = $_
-        $errMsg = if ($_.Exception) { $_.Exception.Message } else { $_.ToString() }
-        Write-Fail "E2E interrotto: $errMsg"
+        Add-TestResult -Name 'ScenarioRenew errore' -Passed $false -Detail $_.Exception.Message
     }
-    finally {
-        Write-Phase 'Cleanup + Ripristino garantito'
+    finally { Restore-TestBaseline -BL $bl }
 
-        # Ripristino BC (per-istanza, rispetta certificati diversi)
+    Show-TestSummary
+}
+
+# ----- ScenarioMixed -----
+# Servizi con certificati diversi: un gruppo scaduto, un gruppo valido.
+# PFX per il rinnovo nella drop folder.
+# Atteso: solo il gruppo scaduto viene aggiornato, il resto invariato.
+function Invoke-ScenarioMixed {
+    Assert-Admin
+    $script:TestResults.Clear()
+    Write-Phase 'SCENARIO: Servizi con certificati diversi'
+    Write-Host '  Gruppo A -> cert scaduto, Gruppo B -> cert valido, PFX valido.'
+    Write-Host '  Atteso: solo Gruppo A aggiornato. Gruppo B invariato.'
+
+    $bl = Save-TestBaseline
+    if ($bl.BCMap.Count -eq 0) { throw 'Nessuna istanza BC trovata.' }
+    if (-not (Test-Path $bl.MainScript)) { throw "_MAINCertManager.ps1 non trovato." }
+
+    $instances = @(Get-NAVServerInstance)
+    if ($instances.Count -lt 2) {
+        Write-Skip 'Servono almeno 2 istanze BC per questo scenario.'
+        Add-TestResult -Name 'ScenarioMixed' -Passed $true -Detail "Saltato: solo $($instances.Count) istanza"
+        Restore-TestBaseline -BL $bl
+        Show-TestSummary
+        return
+    }
+
+    $pwd = Resolve-PfxPassword
+    $securePwd = ConvertTo-SecureString $pwd -AsPlainText -Force
+
+    # Dividi istanze: prima meta' -> Gruppo A (scaduto), seconda meta' -> Gruppo B (valido)
+    $halfIdx = [math]::Ceiling($instances.Count / 2)
+    $groupAInstances = @($instances[0..($halfIdx - 1)] | ForEach-Object { $_.ServerInstance })
+    $groupBInstances = @($instances[$halfIdx..($instances.Count - 1)] | ForEach-Object { $_.ServerInstance })
+
+    try {
+        Write-Phase 'Setup ambiente'
+
+        # Cert A: scadenza prossima (5 giorni)
+        $certA = New-SelfSignedCertificate -DnsName 'certament.e2e.expiring' `
+            -CertStoreLocation 'Cert:\LocalMachine\My' `
+            -NotAfter (Get-Date).AddDays(5) `
+            -FriendlyName "E2E Expiring $($bl.Stamp)" `
+            -KeyExportPolicy Exportable -KeySpec KeyExchange -KeyLength 2048
+        $bl.TestCerts += $certA.Thumbprint.ToUpper()
+        $thumbA = $certA.Thumbprint.ToUpper()
+        Write-Ok "Cert scaduto (Gruppo A): $($thumbA.Substring(0,12))..."
+
+        # Cert B: valido (3 anni)
+        $certB = New-SelfSignedCertificate -DnsName 'certament.e2e.valid' `
+            -CertStoreLocation 'Cert:\LocalMachine\My' `
+            -NotAfter (Get-Date).AddYears(3) `
+            -FriendlyName "E2E Valid $($bl.Stamp)" `
+            -KeyExportPolicy Exportable -KeySpec KeyExchange -KeyLength 2048
+        $bl.TestCerts += $certB.Thumbprint.ToUpper()
+        $thumbB = $certB.Thumbprint.ToUpper()
+        Write-Ok "Cert valido (Gruppo B): $($thumbB.Substring(0,12))..."
+
+        # Cert R: sostituzione PFX (3 anni, diverso da B)
+        $certR = New-SelfSignedCertificate -DnsName 'certament.e2e.replacement' `
+            -CertStoreLocation 'Cert:\LocalMachine\My' `
+            -NotAfter (Get-Date).AddYears(3) `
+            -FriendlyName "E2E Replacement $($bl.Stamp)" `
+            -KeyExportPolicy Exportable -KeySpec KeyExchange -KeyLength 2048
+        $bl.TestCerts += $certR.Thumbprint.ToUpper()
+        $expectedThumb = $certR.Thumbprint.ToUpper()
+        Write-Ok "Cert sostituzione (PFX): $($expectedThumb.Substring(0,12))..."
+
+        # Esporta PFX
+        $pfxFile = Join-Path $bl.PfxDrop ("E2E_MIXED_{0}.pfx" -f $bl.Stamp)
+        Export-PfxCertificate -Cert $certR -FilePath $pfxFile -Password $securePwd | Out-Null
+        $bl.TestFiles += $pfxFile
+        Set-Content (Join-Path $bl.PfxDrop 'password.txt') -Value $pwd -Encoding UTF8 -NoNewline
+
+        # Configura Gruppo A -> cert scaduto
+        Write-Host '  Configurazione Gruppo A (cert scaduto)...'
+        foreach ($inst in $groupAInstances) {
+            Set-BCInstanceThumbprint -Instance $inst -Thumbprint $thumbA -NoRestart
+        }
+
+        # Configura Gruppo B -> cert valido
+        Write-Host '  Configurazione Gruppo B (cert valido)...'
+        foreach ($inst in $groupBInstances) {
+            Set-BCInstanceThumbprint -Instance $inst -Thumbprint $thumbB -NoRestart
+        }
+
+        # IIS -> cert scaduto (dovrebbe essere aggiornato)
+        Set-IISThumbprint -Thumbprint $thumbA -SiteName $bl.IISSite
+
+        # Config: NotifyBeforeDays = 30 (cert A: 5gg -> scaduto, cert B: 1095gg -> valido)
+        Set-TestConfig -BL $bl -NotifyBeforeDays 30
+
+        # Esegui CERTAMENT
+        $exitCode = Invoke-CertamentProcess -MainScript $bl.MainScript
+
+        # Verifica
+        Write-Phase 'Verifica risultati'
+        Import-BCModuleSafe
+        $postMap = @(Get-AllBCThumbprints)
+        $postIIS = Get-LiveIISThumbprint -SiteName $bl.IISSite
+
+        # Gruppo A: deve essere stato aggiornato al cert sostituzione
+        foreach ($inst in $groupAInstances) {
+            $post = $postMap | Where-Object { $_.Instance -eq $inst }
+            $postThumb = if ($post) { $post.Thumbprint } else { '' }
+            Add-TestResult -Name "Gruppo A [$inst] aggiornato" -Passed ($postThumb -eq $expectedThumb) `
+                -Detail "atteso=$($expectedThumb.Substring(0,12)) dopo=$(if ($postThumb) { $postThumb.Substring(0,12) } else { 'N/D' })"
+        }
+
+        # Gruppo B: deve essere INVARIATO (cert valido)
+        foreach ($inst in $groupBInstances) {
+            $post = $postMap | Where-Object { $_.Instance -eq $inst }
+            $postThumb = if ($post) { $post.Thumbprint } else { '' }
+            Add-TestResult -Name "Gruppo B [$inst] invariato" -Passed ($postThumb -eq $thumbB) `
+                -Detail "atteso=$($thumbB.Substring(0,12)) dopo=$(if ($postThumb) { $postThumb.Substring(0,12) } else { 'N/D' })"
+        }
+
+        # IIS: aggiornato (era su cert A scaduto)
+        Add-TestResult -Name 'IIS aggiornato' -Passed ($postIIS -eq $expectedThumb) `
+            -Detail "atteso=$($expectedThumb.Substring(0,12)) dopo=$(if ($postIIS) { $postIIS.Substring(0,12) } else { 'N/D' })"
+    }
+    catch {
+        Add-TestResult -Name 'ScenarioMixed errore' -Passed $false -Detail $_.Exception.Message
+    }
+    finally { Restore-TestBaseline -BL $bl }
+
+    Show-TestSummary
+}
+
+# ----- ScenarioNoCert -----
+# Un servizio senza certificato configurato + servizi con cert scaduto.
+# PFX disponibile.
+# Atteso: servizio senza cert saltato, altri aggiornati.
+function Invoke-ScenarioNoCert {
+    Assert-Admin
+    $script:TestResults.Clear()
+    Write-Phase 'SCENARIO: Servizio senza certificato'
+    Write-Host '  Istanza senza cert + altre con cert scaduto + PFX valido.'
+    Write-Host '  Atteso: istanza senza cert saltata, altre aggiornate.'
+
+    $bl = Save-TestBaseline
+    if ($bl.BCMap.Count -eq 0) { throw 'Nessuna istanza BC trovata.' }
+    if (-not (Test-Path $bl.MainScript)) { throw "_MAINCertManager.ps1 non trovato." }
+
+    $instances = @(Get-NAVServerInstance)
+    if ($instances.Count -lt 2) {
+        Write-Skip 'Servono almeno 2 istanze BC per questo scenario.'
+        Add-TestResult -Name 'ScenarioNoCert' -Passed $true -Detail "Saltato: solo $($instances.Count) istanza"
+        Restore-TestBaseline -BL $bl
+        Show-TestSummary
+        return
+    }
+
+    $pwd = Resolve-PfxPassword
+    $securePwd = ConvertTo-SecureString $pwd -AsPlainText -Force
+
+    # Ultima istanza -> senza cert; le altre -> cert scaduto
+    $noCertInstance = $instances[-1].ServerInstance
+    $expiringInstances = @($instances[0..($instances.Count - 2)] | ForEach-Object { $_.ServerInstance })
+
+    try {
+        Write-Phase 'Setup ambiente'
+
+        # Cert A: scadenza prossima (5 giorni)
+        $certA = New-SelfSignedCertificate -DnsName 'certament.e2e.expiring' `
+            -CertStoreLocation 'Cert:\LocalMachine\My' `
+            -NotAfter (Get-Date).AddDays(5) `
+            -FriendlyName "E2E Expiring $($bl.Stamp)" `
+            -KeyExportPolicy Exportable -KeySpec KeyExchange -KeyLength 2048
+        $bl.TestCerts += $certA.Thumbprint.ToUpper()
+        $thumbA = $certA.Thumbprint.ToUpper()
+        Write-Ok "Cert scaduto: $($thumbA.Substring(0,12))..."
+
+        # Cert R: sostituzione PFX
+        $certR = New-SelfSignedCertificate -DnsName 'certament.e2e.replacement' `
+            -CertStoreLocation 'Cert:\LocalMachine\My' `
+            -NotAfter (Get-Date).AddYears(3) `
+            -FriendlyName "E2E Replacement $($bl.Stamp)" `
+            -KeyExportPolicy Exportable -KeySpec KeyExchange -KeyLength 2048
+        $bl.TestCerts += $certR.Thumbprint.ToUpper()
+        $expectedThumb = $certR.Thumbprint.ToUpper()
+        Write-Ok "Cert sostituzione: $($expectedThumb.Substring(0,12))..."
+
+        # Esporta PFX
+        $pfxFile = Join-Path $bl.PfxDrop ("E2E_NOCERT_{0}.pfx" -f $bl.Stamp)
+        Export-PfxCertificate -Cert $certR -FilePath $pfxFile -Password $securePwd | Out-Null
+        $bl.TestFiles += $pfxFile
+        Set-Content (Join-Path $bl.PfxDrop 'password.txt') -Value $pwd -Encoding UTF8 -NoNewline
+
+        # Configura istanze con cert scaduto
+        Write-Host '  Configurazione istanze con cert scaduto...'
+        foreach ($inst in $expiringInstances) {
+            Set-BCInstanceThumbprint -Instance $inst -Thumbprint $thumbA -NoRestart
+        }
+
+        # Svuota il thumbprint dell'ultima istanza
+        Write-Host "  Rimozione cert da $noCertInstance..."
+        Set-BCInstanceThumbprint -Instance $noCertInstance -Thumbprint '' -NoRestart
+
+        # IIS -> cert scaduto
+        Set-IISThumbprint -Thumbprint $thumbA -SiteName $bl.IISSite
+
+        # Config
+        Set-TestConfig -BL $bl -NotifyBeforeDays 30
+
+        # Esegui CERTAMENT
+        $exitCode = Invoke-CertamentProcess -MainScript $bl.MainScript
+
+        # Verifica
+        Write-Phase 'Verifica risultati'
+        Import-BCModuleSafe
+        $postMap = @(Get-AllBCThumbprints)
+        $postIIS = Get-LiveIISThumbprint -SiteName $bl.IISSite
+
+        # Istanze con cert scaduto: aggiornate
+        foreach ($inst in $expiringInstances) {
+            $post = $postMap | Where-Object { $_.Instance -eq $inst }
+            $postThumb = if ($post) { $post.Thumbprint } else { '' }
+            Add-TestResult -Name "[$inst] aggiornata" -Passed ($postThumb -eq $expectedThumb) `
+                -Detail "atteso=$($expectedThumb.Substring(0,12)) dopo=$(if ($postThumb) { $postThumb.Substring(0,12) } else { 'N/D' })"
+        }
+
+        # Istanza senza cert: deve essere ancora senza cert
+        $postNoCert = $postMap | Where-Object { $_.Instance -eq $noCertInstance }
+        Add-TestResult -Name "[$noCertInstance] saltata (no cert)" -Passed ($null -eq $postNoCert) `
+            -Detail $(if ($postNoCert) { "thumb=$($postNoCert.Thumbprint.Substring(0,12))" } else { 'nessun cert (OK)' })
+
+        # IIS aggiornato
+        Add-TestResult -Name 'IIS aggiornato' -Passed ($postIIS -eq $expectedThumb) `
+            -Detail "dopo=$(if ($postIIS) { $postIIS.Substring(0,12) } else { 'N/D' })"
+    }
+    catch {
+        Add-TestResult -Name 'ScenarioNoCert errore' -Passed $false -Detail $_.Exception.Message
+    }
+    finally { Restore-TestBaseline -BL $bl }
+
+    Show-TestSummary
+}
+
+# ----- ScenarioNoPfx -----
+# Cert in scadenza ma nessun PFX nella drop folder.
+# Atteso: CERTAMENT notifica, nessun cambiamento, exit non-zero.
+function Invoke-ScenarioNoPfx {
+    Assert-Admin
+    $script:TestResults.Clear()
+    Write-Phase 'SCENARIO: Nessun PFX disponibile'
+    Write-Host '  Cert in scadenza, drop folder vuota.'
+    Write-Host '  Atteso: notifica inviata, nessun cambiamento BC/IIS.'
+
+    $bl = Save-TestBaseline
+    if ($bl.BCMap.Count -eq 0) { throw 'Nessuna istanza BC trovata.' }
+    if (-not (Test-Path $bl.MainScript)) { throw "_MAINCertManager.ps1 non trovato." }
+
+    try {
+        Write-Phase 'Setup ambiente'
+
+        # Svuota la drop folder (sposta PFX esistenti in temp)
+        $existingPfx = @(Get-ChildItem $bl.PfxDrop -Filter '*.pfx' -File -ErrorAction SilentlyContinue)
+        foreach ($pf in $existingPfx) {
+            $tempDest = Join-Path $env:TEMP ("E2E_STASH_{0}_{1}" -f $bl.Stamp, $pf.Name)
+            Move-Item $pf.FullName $tempDest -Force
+            $bl.StashedFiles += [PSCustomObject]@{ Original = $pf.FullName; Temp = $tempDest }
+        }
+
+        # Rimuovi password.txt
+        $pwdFile = Join-Path $bl.PfxDrop 'password.txt'
+        if (Test-Path $pwdFile) {
+            $pwdBackup = Join-Path $env:TEMP ("E2E_STASH_{0}_password.txt" -f $bl.Stamp)
+            Move-Item $pwdFile $pwdBackup -Force
+            $bl.StashedFiles += [PSCustomObject]@{ Original = $pwdFile; Temp = $pwdBackup }
+        }
+        Write-Ok "Drop folder svuotata ($($existingPfx.Count) PFX spostati)"
+
+        # Config: forza scadenza
+        Set-TestConfig -BL $bl -NotifyBeforeDays 9999
+
+        # Salva thumbprints pre-esecuzione
+        $preMap = @(Get-AllBCThumbprints)
+        $preIIS = Get-LiveIISThumbprint -SiteName $bl.IISSite
+
+        # Esegui CERTAMENT
+        $exitCode = Invoke-CertamentProcess -MainScript $bl.MainScript
+
+        # Verifica
+        Write-Phase 'Verifica risultati'
+        Import-BCModuleSafe
+        $postMap = @(Get-AllBCThumbprints)
+        $postIIS = Get-LiveIISThumbprint -SiteName $bl.IISSite
+
+        # Nessun thumbprint BC deve essere cambiato
+        $allUnchanged = $true
+        foreach ($pre in $preMap) {
+            $post = $postMap | Where-Object { $_.Instance -eq $pre.Instance }
+            $postThumb = if ($post) { $post.Thumbprint } else { '' }
+            if ($postThumb -ne $pre.Thumbprint) { $allUnchanged = $false }
+        }
+        Add-TestResult -Name 'BC thumbprints invariati' -Passed $allUnchanged
+
+        # IIS invariato
+        Add-TestResult -Name 'IIS thumbprint invariato' -Passed ($postIIS -eq $preIIS) `
+            -Detail "prima=$preIIS dopo=$postIIS"
+
+        Add-TestResult -Name 'CERTAMENT gestito senza crash' -Passed ($null -ne $exitCode) `
+            -Detail "Exit code: $exitCode"
+    }
+    catch {
+        Add-TestResult -Name 'ScenarioNoPfx errore' -Passed $false -Detail $_.Exception.Message
+    }
+    finally { Restore-TestBaseline -BL $bl }
+
+    Show-TestSummary
+}
+
+# ----- ScenarioExpiredPfx -----
+# Cert in scadenza + PFX presente ma gia' scaduto.
+# Atteso: CERTAMENT rifiuta il PFX, thumbprint invariati.
+function Invoke-ScenarioExpiredPfx {
+    Assert-Admin
+    $script:TestResults.Clear()
+    Write-Phase 'SCENARIO: PFX scaduto'
+    Write-Host '  Cert in scadenza, PFX nella drop folder ma scaduto.'
+    Write-Host '  Atteso: PFX rifiutato, nessun cambiamento BC/IIS.'
+
+    $bl = Save-TestBaseline
+    if ($bl.BCMap.Count -eq 0) { throw 'Nessuna istanza BC trovata.' }
+    if (-not (Test-Path $bl.MainScript)) { throw "_MAINCertManager.ps1 non trovato." }
+
+    $pwd = Resolve-PfxPassword
+    $securePwd = ConvertTo-SecureString $pwd -AsPlainText -Force
+
+    try {
+        Write-Phase 'Setup ambiente'
+
+        # Cert scaduto ieri
+        $certExp = New-SelfSignedCertificate -DnsName 'certament.e2e.expired' `
+            -CertStoreLocation 'Cert:\LocalMachine\My' `
+            -NotBefore (Get-Date).AddYears(-2) `
+            -NotAfter (Get-Date).AddDays(-1) `
+            -FriendlyName "E2E Expired $($bl.Stamp)" `
+            -KeyExportPolicy Exportable -KeySpec KeyExchange -KeyLength 2048
+        $bl.TestCerts += $certExp.Thumbprint.ToUpper()
+        $expiredThumb = $certExp.Thumbprint.ToUpper()
+        Write-Ok "Cert scaduto creato: $($expiredThumb.Substring(0,12))..."
+
+        # Esporta PFX scaduto e deposita
+        $pfxTemp = Join-Path $env:TEMP ("E2E_EXP_{0}.pfx" -f $bl.Stamp)
+        Export-PfxCertificate -Cert $certExp -FilePath $pfxTemp -Password $securePwd | Out-Null
+        $bl.TestFiles += $pfxTemp
+
+        $pfxDest = Join-Path $bl.PfxDrop ("E2E_EXPIRED_{0}.pfx" -f $bl.Stamp)
+        Copy-Item $pfxTemp $pfxDest -Force
+        $bl.TestFiles += $pfxDest
+        Set-Content (Join-Path $bl.PfxDrop 'password.txt') -Value $pwd -Encoding UTF8 -NoNewline
+        Write-Ok "PFX scaduto depositato: $pfxDest"
+
+        # Config: forza scadenza
+        Set-TestConfig -BL $bl -NotifyBeforeDays 9999
+
+        # Salva thumbprints pre-esecuzione
+        $preMap = @(Get-AllBCThumbprints)
+        $preIIS = Get-LiveIISThumbprint -SiteName $bl.IISSite
+
+        # Esegui CERTAMENT
+        $exitCode = Invoke-CertamentProcess -MainScript $bl.MainScript
+
+        # Verifica
+        Write-Phase 'Verifica risultati'
+        Import-BCModuleSafe
+        $postMap = @(Get-AllBCThumbprints)
+        $postIIS = Get-LiveIISThumbprint -SiteName $bl.IISSite
+
+        # Il cert scaduto NON deve essere stato installato in BC
+        $noneChanged = $true
+        foreach ($pre in $preMap) {
+            $post = $postMap | Where-Object { $_.Instance -eq $pre.Instance }
+            $postThumb = if ($post) { $post.Thumbprint } else { '' }
+            if ($postThumb -ne $pre.Thumbprint) { $noneChanged = $false }
+            $notExpired = ($postThumb -ne $expiredThumb)
+            Add-TestResult -Name "[$($pre.Instance)] PFX scaduto non installato" -Passed $notExpired `
+                -Detail "thumb=$postThumb"
+        }
+        Add-TestResult -Name 'BC thumbprints invariati' -Passed $noneChanged
+
+        # IIS invariato
+        Add-TestResult -Name 'IIS thumbprint invariato' -Passed ($postIIS -eq $preIIS)
+
+        Add-TestResult -Name 'CERTAMENT exit non-zero' -Passed ($exitCode -ne 0) `
+            -Detail "Exit code: $exitCode"
+    }
+    catch {
+        Add-TestResult -Name 'ScenarioExpiredPfx errore' -Passed $false -Detail $_.Exception.Message
+    }
+    finally { Restore-TestBaseline -BL $bl }
+
+    Show-TestSummary
+}
+
+# ----- ScenarioAllValid -----
+# Tutti i certificati sono validi (lontano dalla scadenza).
+# Atteso: CERTAMENT esce con exit 0 senza modificare nulla.
+function Invoke-ScenarioAllValid {
+    Assert-Admin
+    $script:TestResults.Clear()
+    Write-Phase 'SCENARIO: Tutti i certificati validi'
+    Write-Host '  Nessun cert in scadenza, NotifyBeforeDays = 0.'
+    Write-Host '  Atteso: exit 0, nessun cambiamento.'
+
+    $bl = Save-TestBaseline
+    if ($bl.BCMap.Count -eq 0) { throw 'Nessuna istanza BC trovata.' }
+    if (-not (Test-Path $bl.MainScript)) { throw "_MAINCertManager.ps1 non trovato." }
+
+    try {
+        Write-Phase 'Setup ambiente'
+
+        # Verifica che i cert attuali non siano gia' scaduti
+        $allValid = $true
+        foreach ($entry in $bl.BCMap) {
+            $cert = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Thumbprint.ToUpper() -eq $entry.Thumbprint }
+            if (-not $cert -or $cert.NotAfter -lt (Get-Date)) {
+                $allValid = $false
+                Write-Fail "Cert $($entry.Thumbprint.Substring(0,12)) gia' scaduto - scenario non applicabile"
+            }
+        }
+        if (-not $allValid) {
+            Add-TestResult -Name 'ScenarioAllValid' -Passed $true -Detail 'Saltato: cert attuali gia scaduti'
+            Restore-TestBaseline -BL $bl
+            Show-TestSummary
+            return
+        }
+
+        # Config: NotifyBeforeDays = 0 (nessun cert e' scaduto -> nessuna azione)
+        Set-TestConfig -BL $bl -NotifyBeforeDays 0
+
+        # Salva thumbprints pre-esecuzione
+        $preMap = @(Get-AllBCThumbprints)
+        $preIIS = Get-LiveIISThumbprint -SiteName $bl.IISSite
+
+        # Esegui CERTAMENT
+        $exitCode = Invoke-CertamentProcess -MainScript $bl.MainScript
+
+        # Verifica
+        Write-Phase 'Verifica risultati'
+        Import-BCModuleSafe
+        $postMap = @(Get-AllBCThumbprints)
+        $postIIS = Get-LiveIISThumbprint -SiteName $bl.IISSite
+
+        # Nessun cambiamento
+        $allUnchanged = $true
+        foreach ($pre in $preMap) {
+            $post = $postMap | Where-Object { $_.Instance -eq $pre.Instance }
+            $postThumb = if ($post) { $post.Thumbprint } else { '' }
+            if ($postThumb -ne $pre.Thumbprint) { $allUnchanged = $false }
+        }
+        Add-TestResult -Name 'BC thumbprints invariati' -Passed $allUnchanged
+        Add-TestResult -Name 'IIS thumbprint invariato' -Passed ($postIIS -eq $preIIS)
+        Add-TestResult -Name 'Exit code = 0' -Passed ($exitCode -eq 0) -Detail "code=$exitCode"
+    }
+    catch {
+        Add-TestResult -Name 'ScenarioAllValid errore' -Passed $false -Detail $_.Exception.Message
+    }
+    finally { Restore-TestBaseline -BL $bl }
+
+    Show-TestSummary
+}
+
+# =============================================================
+# RunScenarios - esegue tutti gli scenari
+# =============================================================
+function Invoke-RunScenarios {
+    Assert-Admin
+    Write-Host ''
+    Write-Host '+--------------------------------------------------+' -ForegroundColor Cyan
+    Write-Host '|    CERTAMENT E2E - Scenari di test               |' -ForegroundColor Cyan
+    Write-Host '+--------------------------------------------------+' -ForegroundColor Cyan
+    Write-Host ''
+    Write-Host 'Ogni scenario crea un ambiente specifico, esegue CERTAMENT'
+    Write-Host 'e verifica che il comportamento sia corretto.'
+    Write-Host ''
+
+    # Risolvi password una volta sola (per gli scenari che la richiedono)
+    $null = Resolve-PfxPassword
+
+    $allResults = [System.Collections.ArrayList]::new()
+
+    $scenarios = @(
+        @{ Name = 'ScenarioRenew';      Fn = { Invoke-ScenarioRenew } },
+        @{ Name = 'ScenarioMixed';      Fn = { Invoke-ScenarioMixed } },
+        @{ Name = 'ScenarioNoCert';     Fn = { Invoke-ScenarioNoCert } },
+        @{ Name = 'ScenarioNoPfx';      Fn = { Invoke-ScenarioNoPfx } },
+        @{ Name = 'ScenarioExpiredPfx'; Fn = { Invoke-ScenarioExpiredPfx } },
+        @{ Name = 'ScenarioAllValid';   Fn = { Invoke-ScenarioAllValid } }
+    )
+
+    foreach ($s in $scenarios) {
         Write-Host ''
-        Write-Host '  Ripristino BC (per-istanza)...' -ForegroundColor Yellow
+        Write-Host (">>> {0}" -f $s.Name) -ForegroundColor Yellow
+        Write-Host ('=' * 60) -ForegroundColor DarkGray
         try {
-            Restore-BCThumbprints -BaselineMap $baselineMap
-            Write-Host '    BC ripristinato.' -ForegroundColor Green
+            & $s.Fn
         }
         catch {
-            Write-Warning ("    BC restore: {0}" -f $_.Exception.Message)
+            Write-Fail "Scenario $($s.Name) fallito: $($_.Exception.Message)"
+            Add-TestResult -Name $s.Name -Passed $false -Detail $_.Exception.Message
         }
-
-        # Ripristino IIS
-        Write-Host '  Ripristino IIS...' -ForegroundColor Yellow
-        try {
-            $restoreIISThumb = if ($originalIISThumb) { $originalIISThumb } else { $originalThumb }
-            Set-IISThumbprint -Thumbprint $restoreIISThumb -SiteName $iisSite
-            iisreset /restart | Out-Null
-            Write-Host '    IIS reset eseguito.' -ForegroundColor Green
-        }
-        catch {
-            Write-Warning ("    IIS restore: {0}" -f $_.Exception.Message)
-        }
-
-        # Ripristino config (backup file, fallback snapshot memoria)
-        Write-Host '  Ripristino config...' -ForegroundColor Yellow
-        try {
-            if ($configBackup -and (Test-Path $configBackup)) {
-                Copy-Item $configBackup $configPath -Force
-                $configRestored = $true
-                Write-Host '    Config ripristinato da backup file.' -ForegroundColor Green
-            }
-            elseif (-not [string]::IsNullOrWhiteSpace($configOriginalRaw)) {
-                Set-Content $configPath -Value $configOriginalRaw -Encoding UTF8
-                $configRestored = $true
-                Write-Host '    Config ripristinato da snapshot in memoria.' -ForegroundColor Green
-            }
-            else {
-                Write-Warning '    Nessun backup disponibile per il config.'
-            }
-        }
-        catch {
-            Write-Warning ("    Config restore: {0}" -f $_.Exception.Message)
-        }
-
-        # Pulizia
-        if ($testPfxTemp -and (Test-Path $testPfxTemp)) {
-            Remove-Item $testPfxTemp -Force -ErrorAction SilentlyContinue
-        }
-        if ($destPwd -and (Test-Path $destPwd)) {
-            Remove-Item $destPwd -Force -ErrorAction SilentlyContinue
-        }
-        if ($destPfx -and (Test-Path $destPfx)) {
-            Remove-Item $destPfx -Force -ErrorAction SilentlyContinue
-        }
-        if ($testThumb) {
-            Remove-Item "Cert:\LocalMachine\My\$testThumb" -Force -ErrorAction SilentlyContinue
-        }
-        Write-Host '  Pulizia completata.' -ForegroundColor Gray
+        $null = $allResults.AddRange(@($script:TestResults))
     }
 
-    # ── Riepilogo finale ─────────────────────────────────────
-    $pass  = $bcOk -and $iisOk -and $configRestored -and (-not $runError)
-    $baselineShort = if ($originalThumb) { $originalThumb.Substring(0,[Math]::Min(36,$originalThumb.Length)) } else { 'N/D' }
-    $testShort = if ($testThumb) { $testThumb.Substring(0,[Math]::Min(36,$testThumb.Length)) } else { 'N/D' }
-    $color = if ($pass) { 'Green' } else { 'Red' }
+    # Riepilogo finale
+    $script:TestResults = $allResults
     Write-Host ''
-    Write-Host '+--------------------------------------------------+' -ForegroundColor $color
-    Write-Host ('|  RISULTATO: {0,-38}|' -f $(if ($pass) { 'PASS - Test superato!' } else { 'FAIL - vedere dettagli sopra' })) -ForegroundColor $color
-    Write-Host '|                                                  |' -ForegroundColor $color
-    Write-Host ("|  Baseline  : {0,-36}|" -f $baselineShort) -ForegroundColor $color
-    Write-Host ("|  Test cert : {0,-36}|" -f $testShort) -ForegroundColor $color
-    Write-Host ("|  BC camb.  : {0,-36}|" -f $(if ($bcOk)  { 'SI' } else { 'NO' })) -ForegroundColor $color
-    Write-Host ("|  IIS camb. : {0,-36}|" -f $(if ($iisOk) { 'SI' } else { 'NO' })) -ForegroundColor $color
-    Write-Host ("|  Config OK : {0,-36}|" -f $(if ($configRestored) { 'SI' } else { 'NO' })) -ForegroundColor $color
-    if ($runError) {
-        $errorSummary = if ($runError.Exception) { $runError.Exception.Message } else { $runError.ToString() }
-        $errorSummary = $errorSummary.Substring(0,[Math]::Min(36,$errorSummary.Length))
-        Write-Host ("|  Errore    : {0,-36}|" -f $errorSummary) -ForegroundColor $color
-    }
-    Write-Host '+--------------------------------------------------+' -ForegroundColor $color
-    Write-Host ''
+    Write-Host ('+' + ('=' * 50) + '+') -ForegroundColor Cyan
+    Write-Host '|         RIEPILOGO FINALE SCENARI                 |' -ForegroundColor Cyan
+    Write-Host ('+' + ('=' * 50) + '+') -ForegroundColor Cyan
+    Show-TestSummary
 }
 
 # =============================================================
@@ -1063,64 +1409,53 @@ function Show-Help {
     Write-Host ''
     Write-Host 'CERTAMENT E2E Tester'
     Write-Host '===================='
-    Write-Host 'Verifica il ciclo completo di aggiornamento certificati BC + IIS'
-    Write-Host 'e testa le singole funzionalita di CERTAMENT.'
+    Write-Host 'Crea ambienti di test specifici, esegue CERTAMENT e verifica'
+    Write-Host 'che il comportamento sia corretto.'
     Write-Host ''
-    Write-Host 'Utilizzo:'
+    Write-Host 'SCENARI (ambiente -> CERTAMENT -> verifica):'
     Write-Host '  .\Certament-E2E-Tester.ps1'
-    Write-Host '      -> Test completo del rinnovo certificato (chiede password PFX)'
+    Write-Host '      -> Esegue tutti gli scenari in sequenza (default)'
     Write-Host ''
-    Write-Host '  .\Certament-E2E-Tester.ps1 -SecretFilePath C:\temp\pfxpwd.txt'
-    Write-Host '      -> Test completo con password letta da file'
+    Write-Host '  -Action ScenarioRenew      Tutti i servizi con cert scaduto + PFX valido'
+    Write-Host '                             -> aggiornamento completo BC + IIS'
     Write-Host ''
-    Write-Host '  .\Certament-E2E-Tester.ps1 -Action RunAll'
-    Write-Host '      -> Esegue tutti i test non-distruttivi in sequenza'
+    Write-Host '  -Action ScenarioMixed      Servizi con cert diversi (scaduto vs valido)'
+    Write-Host '                             -> solo i servizi con cert scaduto aggiornati'
     Write-Host ''
-    Write-Host '  .\Certament-E2E-Tester.ps1 -Action TestConfig'
-    Write-Host '      -> Valida config.json (campi obbligatori, URL placeholder, ecc.)'
+    Write-Host '  -Action ScenarioNoCert     Servizio senza cert + servizi con cert scaduto'
+    Write-Host '                             -> servizio senza cert saltato, altri aggiornati'
     Write-Host ''
-    Write-Host '  .\Certament-E2E-Tester.ps1 -Action TestModules'
-    Write-Host '      -> Verifica che tutti i moduli si importino e le funzioni esistano'
+    Write-Host '  -Action ScenarioNoPfx      Cert in scadenza, drop folder vuota'
+    Write-Host '                             -> notifica, nessun cambiamento'
     Write-Host ''
-    Write-Host '  .\Certament-E2E-Tester.ps1 -Action TestNotification'
-    Write-Host '      -> Invia notifiche di test ai webhook Customer e Internal'
+    Write-Host '  -Action ScenarioExpiredPfx Cert in scadenza + PFX scaduto'
+    Write-Host '                             -> PFX rifiutato, nessun cambiamento'
     Write-Host ''
-    Write-Host '  .\Certament-E2E-Tester.ps1 -Action TestHeartbeat'
-    Write-Host '      -> Testa la connettivita heartbeat Azure'
+    Write-Host '  -Action ScenarioAllValid   Tutti i cert validi, NotifyBeforeDays = 0'
+    Write-Host '                             -> exit 0, nessuna modifica'
     Write-Host ''
-    Write-Host '  .\Certament-E2E-Tester.ps1 -Action TestExpiredPfx'
-    Write-Host '      -> Verifica che CERTAMENT rifiuti un PFX con certificato scaduto'
+    Write-Host 'VERIFICHE (non modificano l''ambiente):'
+    Write-Host '  -Action RunAll             Esegue tutti i test non distruttivi'
+    Write-Host '  -Action TestConfig         Valida config.json'
+    Write-Host '  -Action TestModules        Verifica importazione moduli'
+    Write-Host '  -Action TestNotification   Testa invio webhook'
+    Write-Host '  -Action TestHeartbeat      Testa heartbeat Azure'
+    Write-Host '  -Action TestCertStore      Verifica coerenza cert store / BC / IIS'
     Write-Host ''
-    Write-Host '  .\Certament-E2E-Tester.ps1 -Action TestNoPfx'
-    Write-Host '      -> Verifica il comportamento con drop folder vuoto'
-    Write-Host ''
-    Write-Host '  .\Certament-E2E-Tester.ps1 -Action TestCertStore'
-    Write-Host '      -> Controlla coerenza certificati tra BC, IIS e cert store'
-    Write-Host ''
-    Write-Host '  .\Certament-E2E-Tester.ps1 -Action Status'
-    Write-Host '      -> Stato corrente: task, thumbprint BC/IIS, drop folder'
-    Write-Host ''
-    Write-Host '  .\Certament-E2E-Tester.ps1 -Action Restore'
-    Write-Host '      -> Ripristino emergenza: riporta BC/IIS al certificato originale'
+    Write-Host 'UTILITA:'
+    Write-Host '  -Action Status             Stato corrente: task, thumbprint, drop folder'
+    Write-Host '  -Action Restore            Ripristino emergenza BC/IIS'
     Write-Host ''
     Write-Host 'Parametri:'
-    Write-Host '  -Action           RunFull | TestConfig | TestModules | TestNotification |'
-    Write-Host '                    TestHeartbeat | TestExpiredPfx | TestNoPfx | TestCertStore |'
-    Write-Host '                    RunAll | Status | Restore | Help'
     Write-Host '  -InstallRoot      Cartella CERTAMENT (default: C:\CERTAMENT)'
     Write-Host '  -SecretFilePath   File plain-text con la password PFX (opzionale)'
     Write-Host ''
-    Write-Host 'RunFull esegue il ciclo completo:'
-    Write-Host '  1) Legge config.json da InstallRoot'
-    Write-Host '  2) Carica il modulo BC e rileva il thumbprint baseline'
-    Write-Host '  3) Chiede (o legge da file) la password PFX'
-    Write-Host '  4) Backup config + forza NotifyBeforeDays = 9999'
-    Write-Host '  5) Crea certificato self-signed 3 anni + PFX'
-    Write-Host '  6) Deposita PFX + password.txt in drop folder'
-    Write-Host '  7) Esegue _MAINCertManager.ps1 direttamente'
-    Write-Host '  8) Verifica che BC e IIS abbiano il nuovo thumbprint'
-    Write-Host '  9) Ripristina BC, IIS, config - rimuove file temporanei'
-    Write-Host '  10) Stampa PASS o FAIL'
+    Write-Host 'Ogni scenario:'
+    Write-Host '  1) Salva il baseline (thumbprint per istanza BC + IIS + config)'
+    Write-Host '  2) Crea certificati di test e configura l''ambiente'
+    Write-Host '  3) Esegue _MAINCertManager.ps1'
+    Write-Host '  4) Verifica il comportamento per ogni istanza'
+    Write-Host '  5) Ripristina tutto allo stato originale'
     Write-Host ''
 }
 
@@ -1128,13 +1463,17 @@ function Show-Help {
 # Dispatch
 # =============================================================
 switch ($Action) {
-    'RunFull'          { Invoke-RunFull }
+    'RunScenarios'     { Invoke-RunScenarios }
+    'ScenarioRenew'    { Invoke-ScenarioRenew }
+    'ScenarioMixed'    { Invoke-ScenarioMixed }
+    'ScenarioNoCert'   { Invoke-ScenarioNoCert }
+    'ScenarioNoPfx'    { Invoke-ScenarioNoPfx }
+    'ScenarioExpiredPfx' { Invoke-ScenarioExpiredPfx }
+    'ScenarioAllValid' { Invoke-ScenarioAllValid }
+    'TestConfig'       { Invoke-TestConfig }
+    'TestModules'      { Invoke-TestModules }
     'TestNotification' { Invoke-TestNotification }
     'TestHeartbeat'    { Invoke-TestHeartbeat }
-    'TestModules'      { Invoke-TestModules }
-    'TestExpiredPfx'   { Invoke-TestExpiredPfx }
-    'TestNoPfx'        { Invoke-TestNoPfx }
-    'TestConfig'       { Invoke-TestConfig }
     'TestCertStore'    { Invoke-TestCertStore }
     'RunAll'           { Invoke-RunAll }
     'Status'           { Invoke-Status }
