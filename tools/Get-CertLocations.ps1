@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Find which certificate stores contain a given thumbprint.
 

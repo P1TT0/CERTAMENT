@@ -1,4 +1,4 @@
-function Get-PfxFile {
+﻿function Get-PfxFile {
     [CmdletBinding()]
     param(
         [string]$Path = "C:\Certs"

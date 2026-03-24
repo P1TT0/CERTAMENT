@@ -1,4 +1,4 @@
-function Get-CertDetails {
+﻿function Get-CertDetails {
     [CmdletBinding()]
     param(
         [Parameter(ValueFromPipeline = $true, Mandatory = $true)]

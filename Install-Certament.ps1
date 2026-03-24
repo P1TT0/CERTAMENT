@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     CERTAMENT interactive installer.
 
@@ -164,6 +164,7 @@ function Invoke-Diagnostics {
     }
     $checkPath   = Read-Value -Prompt "Percorso installazione da verificare" -Default $defaultPath
     $webhookTable = @{}
+    $notificationsEnabled = $true
     $heartbeatEnabled = $false
     $heartbeatUrl = ""
     $heartbeatTimeoutSec = 10
@@ -219,19 +220,25 @@ function Invoke-Diagnostics {
             $iisSiteConfigured = ($cfg.IIS -and $cfg.IIS.SiteName -and $cfg.IIS.SiteName.Trim() -ne "")
             Write-DiagCheck -AsWarn -Result $iisSiteConfigured -Label "config.json: IIS.SiteName configurato"
 
-            if ($cfg.Notifications -and $cfg.Notifications.Webhooks) {
-                if ($cfg.Notifications.Webhooks.Internal -and $cfg.Notifications.Webhooks.Internal.Trim() -ne "") {
-                    $webhookTable['Internal'] = [string]$cfg.Notifications.Webhooks.Internal
-                }
-                if ($cfg.Notifications.Webhooks.Customer -and $cfg.Notifications.Webhooks.Customer.Trim() -ne "") {
-                    $webhookTable['Customer'] = [string]$cfg.Notifications.Webhooks.Customer
-                }
+            if ($cfg.Notifications -and $cfg.Notifications.PSObject.Properties['EnableWebhook'] -and $cfg.Notifications.EnableWebhook -eq $false) {
+                $notificationsEnabled = $false
+                Write-Info "  Notifications.EnableWebhook=false: test webhook disabilitati."
             }
-            Write-DiagCheck -AsWarn -Result $webhookTable.ContainsKey('Internal') -Label "config.json: webhook Internal configurato"
-            Write-DiagCheck -AsWarn -Result $webhookTable.ContainsKey('Customer') -Label "config.json: webhook Customer configurato"
-            if ($webhookTable.ContainsKey('Internal') -and $webhookTable.ContainsKey('Customer')) {
-                $sameWebhook = ([string]$webhookTable['Internal'] -eq [string]$webhookTable['Customer'])
-                Write-DiagCheck -AsWarn -Result (-not $sameWebhook) -Label "Webhook Customer/Internal separati"
+            if ($notificationsEnabled) {
+                if ($cfg.Notifications -and $cfg.Notifications.Webhooks) {
+                    if ($cfg.Notifications.Webhooks.Internal -and $cfg.Notifications.Webhooks.Internal.Trim() -ne "") {
+                        $webhookTable['Internal'] = [string]$cfg.Notifications.Webhooks.Internal
+                    }
+                    if ($cfg.Notifications.Webhooks.Customer -and $cfg.Notifications.Webhooks.Customer.Trim() -ne "") {
+                        $webhookTable['Customer'] = [string]$cfg.Notifications.Webhooks.Customer
+                    }
+                }
+                Write-DiagCheck -AsWarn -Result $webhookTable.ContainsKey('Internal') -Label "config.json: webhook Internal configurato"
+                Write-DiagCheck -AsWarn -Result $webhookTable.ContainsKey('Customer') -Label "config.json: webhook Customer configurato"
+                if ($webhookTable.ContainsKey('Internal') -and $webhookTable.ContainsKey('Customer')) {
+                    $sameWebhook = ([string]$webhookTable['Internal'] -eq [string]$webhookTable['Customer'])
+                    Write-DiagCheck -AsWarn -Result (-not $sameWebhook) -Label "Webhook Customer/Internal separati"
+                }
             }
 
             if ($cfg.Heartbeat) {
@@ -304,23 +311,22 @@ function Invoke-Diagnostics {
     $notifCmd = Get-Command Send-Notification -ErrorAction SilentlyContinue
     Write-DiagCheck -AsWarn -Result ($null -ne $notifCmd) -Label "Funzione Send-Notification disponibile"
 
-    if ($notifCmd -and $webhookTable.ContainsKey('Internal')) {
-        $testTitle = "CERTAMENT - Test notifica Internal"
-        $testMsg = "Test invio notifica da diagnostica CERTAMENT su $env:COMPUTERNAME ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))"
-        $sentInternal = Send-Notification -Title $testTitle -Message $testMsg -Target "Internal" -Webhooks $webhookTable
-        Write-DiagCheck -AsWarn -Result ([bool]$sentInternal) -Label "Invio notifica test Internal"
+    if (-not $notificationsEnabled) {
+        Write-Info "  Notifiche disabilitate da config: test webhook saltati."
     }
-
-    if ($notifCmd -and $webhookTable.ContainsKey('Customer')) {
-        $testCustomer = Read-YesNo -Prompt "Inviare test notifica anche al webhook Customer?" -Default $false
-        if ($testCustomer) {
-            $testTitle = "CERTAMENT - Test notifica Customer"
-            $testMsg = "Test invio notifica da diagnostica CERTAMENT su $env:COMPUTERNAME ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))"
-            $sentCustomer = Send-Notification -Title $testTitle -Message $testMsg -Target "Customer" -Webhooks $webhookTable
-            Write-DiagCheck -AsWarn -Result ([bool]$sentCustomer) -Label "Invio notifica test Customer"
+    else {
+        if ($notifCmd -and $webhookTable.ContainsKey('Internal')) {
+            $testTitle = "CERTAMENT - Test diagnostica Internal"
+            $testMsg = "Test webhook Internal da diagnostica CERTAMENT su $env:COMPUTERNAME ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))"
+            $sentInternal = Send-Notification -Title $testTitle -Message $testMsg -Target "Internal" -Webhooks $webhookTable
+            Write-DiagCheck -Result ([bool]$sentInternal) -Label "Invio notifica test Internal"
         }
-        else {
-            Write-Info "  Test webhook Customer saltato."
+
+        if ($notifCmd -and $webhookTable.ContainsKey('Customer')) {
+            $testTitle = "CERTAMENT - Test diagnostica Customer"
+            $testMsg = "Test webhook Customer da diagnostica CERTAMENT su $env:COMPUTERNAME ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))"
+            $sentCustomer = Send-Notification -Title $testTitle -Message $testMsg -Target "Customer" -Webhooks $webhookTable
+            Write-DiagCheck -Result ([bool]$sentCustomer) -Label "Invio notifica test Customer"
         }
     }
 
@@ -347,7 +353,7 @@ function Invoke-Diagnostics {
             $hbErr = if ($_.Exception) { $_.Exception.Message } else { $_.ToString() }
             Write-DiagCheck -Result $false -Label "Heartbeat Azure inviato" -Detail $hbErr
 
-            if ($notifCmd -and $webhookTable.ContainsKey('Internal')) {
+            if ($notifCmd -and $notificationsEnabled -and $webhookTable.ContainsKey('Internal')) {
                 $alertTitle = "CERTAMENT - Errore heartbeat"
                 $alertMsg = "Heartbeat Azure fallito durante diagnostica su $env:COMPUTERNAME.`nErrore: $hbErr"
                 $alertSent = Send-Notification -Title $alertTitle -Message $alertMsg -Target "Internal" -Webhooks $webhookTable
@@ -363,9 +369,9 @@ function Invoke-Diagnostics {
     Write-Host ""
     Write-Host "  [Scheduled Task]" -ForegroundColor Yellow
     $task = Get-ScheduledTask -TaskName "CERTAMENT" -ErrorAction SilentlyContinue
-    Write-DiagCheck -Result ($null -ne $task) -Label "Task 'CERTAMENT' registrato"
+    Write-DiagCheck -AsWarn -Result ($null -ne $task) -Label "Task 'CERTAMENT' registrato"
     if ($task) {
-        Write-DiagCheck -Result ($task.State -in @('Ready', 'Running')) -Label "Task stato: $($task.State)"
+        Write-DiagCheck -AsWarn -Result ($task.State -in @('Ready', 'Running')) -Label "Task stato: $($task.State)"
         $taskInfo = Get-ScheduledTaskInfo -TaskName "CERTAMENT" -ErrorAction SilentlyContinue
         if ($taskInfo -and $taskInfo.NextRunTime) {
             Write-Info "  Prossima esecuzione: $($taskInfo.NextRunTime.ToString('yyyy-MM-dd HH:mm'))"
@@ -438,7 +444,7 @@ function Invoke-Diagnostics {
                     if ($proto -eq 'https') { $httpsCount++; Write-Info "  Binding HTTPS: $info" }
                 }
             } catch { }
-            if ($httpsCount -eq 0) { Write-Warn "  Nessun binding HTTPS trovato per il sito." }
+            Write-DiagCheck -AsWarn -Result ($httpsCount -gt 0) -Label "Binding HTTPS presenti per il sito ($httpsCount)"
         }
     }
 
@@ -512,6 +518,30 @@ function Invoke-Diagnostics {
                     } else {
                         Write-Info "  $iName [$iState] nessun thumbprint configurato"
                     }
+                }
+
+                $runWsCheck = Read-YesNo -Prompt "Eseguire anche test reachability web service BC?" -Default $false
+                if ($runWsCheck) {
+                    $wsResults = Test-BCWebServices -TimeoutSec 15
+                    if ($wsResults) {
+                        $wsErrors = @($wsResults | Where-Object { $_.Status -eq 'ERROR' })
+                        $wsSkipped = @($wsResults | Where-Object { $_.Status -like 'SKIPPED*' })
+
+                        foreach ($wsResult in $wsResults) {
+                            $wsDetail = if ($wsResult.Response) { [string]$wsResult.Response } elseif ($wsResult.Error) { [string]$wsResult.Error } else { 'Nessun dettaglio' }
+                            Write-Info "  WS $($wsResult.Instance): $($wsResult.Status) - $wsDetail"
+                        }
+
+                        Write-DiagCheck -AsWarn -Result ($wsResults.Count -gt 0) -Label "Test web service BC eseguito" -Detail "$($wsResults.Count) endpoint controllati"
+                        Write-DiagCheck -AsWarn -Result ($wsErrors.Count -eq 0) -Label "Endpoint web service BC raggiungibili"
+                        Write-DiagCheck -AsWarn -Result ($wsSkipped.Count -eq 0) -Label "URL web service BC validi"
+                    }
+                    else {
+                        Write-DiagCheck -AsWarn -Result $false -Label "Test web service BC eseguito" -Detail "Nessun risultato restituito"
+                    }
+                }
+                else {
+                    Write-Info "  Test web service BC saltato."
                 }
             }
         } catch {
@@ -678,9 +708,8 @@ function Invoke-Install {
             CustomerName = $customerName
         }
         Pfx = [ordered]@{
-            Path             = $pfxPath
-            Password         = $pfxPassword
-            AutoSelectLatest = $true
+            Path     = $pfxPath
+            Password = $pfxPassword
         }
         BusinessCentral = [ordered]@{
             UseLatestModule = $true

@@ -1,4 +1,4 @@
-function Test-SslThumbprint {
+﻿function Test-SslThumbprint {
     [CmdletBinding()]
     param([string]$Url)
 
@@ -30,7 +30,8 @@ function Test-BCWebServices {
     [CmdletBinding()]
     param (
         [int]$TimeoutSec = 10,
-        [string]$ExpectedThumbprint = ''
+        [string]$ExpectedThumbprint = '',
+        [string[]]$InstanceNames = @()
     )
 
     if (-not (Get-Command -Name Get-NAVServerInstance -ErrorAction SilentlyContinue)) {
@@ -59,10 +60,16 @@ function Test-BCWebServices {
     }
 
     $expectedNorm = if ($ExpectedThumbprint) { ($ExpectedThumbprint -replace '\s', '').ToUpper() } else { '' }
+    $instanceFilter = @($InstanceNames | Where-Object { $_ -and $_.Trim() -ne '' } | ForEach-Object { $_.Trim() })
     $results = @()
 
     foreach ($inst in $instances) {
         $name = $inst.ServerInstance
+
+        if ($instanceFilter.Count -gt 0 -and ($instanceFilter -notcontains $name)) {
+            Write-Host "  Skip $name (istanza non pertinente)" -ForegroundColor Gray
+            continue
+        }
 
         # Skip istanze senza thumbprint configurato
         $instThumb = $null

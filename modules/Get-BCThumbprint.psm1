@@ -1,4 +1,4 @@
-function Get-BCThumbprint {
+﻿function Get-BCThumbprint {
     [CmdletBinding()]
     param()
 

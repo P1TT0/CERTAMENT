@@ -1,4 +1,4 @@
-function Update-IISBinding {
+﻿function Update-IISBinding {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]

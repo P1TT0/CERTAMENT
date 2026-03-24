@@ -1,4 +1,4 @@
-function Install-PfxCert {
+﻿function Install-PfxCert {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]

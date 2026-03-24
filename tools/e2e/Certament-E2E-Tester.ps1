@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     CERTAMENT E2E Tester - test di scenario per il ciclo di aggiornamento certificati.
 .DESCRIPTION

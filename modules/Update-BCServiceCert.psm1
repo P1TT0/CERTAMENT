@@ -1,4 +1,4 @@
-function Update-BCServiceCert {
+﻿function Update-BCServiceCert {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Remove a certificate from all stores by thumbprint.
 

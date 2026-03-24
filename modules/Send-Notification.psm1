@@ -1,4 +1,4 @@
-function Send-Notification {
+﻿function Send-Notification {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]

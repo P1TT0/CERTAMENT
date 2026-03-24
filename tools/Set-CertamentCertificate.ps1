@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Selettore manuale certificato per CERTAMENT.
 .DESCRIPTION

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     CERTAMENT - Automated certificate lifecycle manager for Business Central.
 
@@ -86,6 +86,15 @@ if ($config.Logging.RetentionDays) {
         Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
+# Clean old snapshots (30 days retention)
+$snapshotCleanDir = Join-Path $logDir 'snapshots'
+if (Test-Path $snapshotCleanDir) {
+    $snapCutoff = (Get-Date).AddDays(-30)
+    Get-ChildItem -Path $snapshotCleanDir -Filter "snapshot_*.json" |
+        Where-Object { $_.LastWriteTime -lt $snapCutoff } |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
 # ============================================================
 # Import BC Management Module
 # ============================================================
@@ -160,6 +169,89 @@ $moduleDir = Join-Path $PSScriptRoot "modules"
 }
 
 $script:HeartbeatFailureNotified = $false
+
+# ============================================================
+# Snapshot persistence directory
+# ============================================================
+$script:SnapshotDir = Join-Path $PSScriptRoot (Join-Path $logPath 'snapshots')
+if (-not (Test-Path $script:SnapshotDir)) { New-Item -ItemType Directory -Path $script:SnapshotDir -Force | Out-Null }
+
+# ============================================================
+# Helper: save binding snapshots to JSON file
+# ============================================================
+function Save-BindingSnapshot {
+    param(
+        [string]$OldThumbprint,
+        [string]$NewThumbprint,
+        [array]$SslSnapshot   = @(),
+        [array]$UrlAclSnapshot = @(),
+        [array]$IISSnapshot   = @()
+    )
+
+    $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $fileName = "snapshot_{0}_{1}.json" -f $ts, ($OldThumbprint.Substring(0, [Math]::Min(8, $OldThumbprint.Length)))
+    $filePath = Join-Path $script:SnapshotDir $fileName
+
+    $data = [ordered]@{
+        Timestamp     = (Get-Date).ToString('o')
+        Server        = $env:COMPUTERNAME
+        OldThumbprint = $OldThumbprint
+        NewThumbprint = $NewThumbprint
+        SslBindings   = @($SslSnapshot | ForEach-Object {
+            [ordered]@{ Endpoint = $_.Endpoint; IsHostnamePort = $_.IsHostnamePort; CertHash = $_.CertHash; AppId = $_.AppId; StoreName = $_.StoreName }
+        })
+        UrlAcls       = @($UrlAclSnapshot | ForEach-Object {
+            [ordered]@{ Url = $_.Url; SDDL = $_.SDDL }
+        })
+        IISBindings   = @($IISSnapshot | ForEach-Object {
+            [ordered]@{ BindingInformation = $_.BindingInformation; CertificateStoreName = $_.CertificateStoreName; SslFlags = $_.SslFlags; Thumbprint = $_.Thumbprint }
+        })
+    }
+
+    try {
+        $data | ConvertTo-Json -Depth 6 | Set-Content -Path $filePath -Encoding UTF8 -Force
+        Write-Host "  Snapshot salvato su disco: $filePath"
+        return $filePath
+    }
+    catch {
+        Write-Warning "Errore salvataggio snapshot: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+# ============================================================
+# Helper: load latest binding snapshot from disk
+# ============================================================
+function Get-LatestBindingSnapshot {
+    param(
+        [string]$Thumbprint = ""
+    )
+
+    if (-not (Test-Path $script:SnapshotDir)) { return $null }
+
+    $pattern = if ($Thumbprint) {
+        $prefix = $Thumbprint.Substring(0, [Math]::Min(8, $Thumbprint.Length))
+        "snapshot_*_$prefix.json"
+    }
+    else {
+        "snapshot_*.json"
+    }
+
+    $latest = Get-ChildItem -Path $script:SnapshotDir -Filter $pattern -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+    if (-not $latest) { return $null }
+
+    try {
+        $data = Get-Content -Raw -Path $latest.FullName -ErrorAction Stop | ConvertFrom-Json
+        Write-Host "  Ultimo snapshot caricato da: $($latest.Name) ($($data.Timestamp))"
+        return $data
+    }
+    catch {
+        Write-Warning "Errore lettura snapshot $($latest.Name): $($_.Exception.Message)"
+        return $null
+    }
+}
 
 # ============================================================
 # Helper: exit with transcript cleanup
@@ -399,13 +491,15 @@ function Wait-ForWebServices {
     param(
         [int]$MaxWaitSec = 600,
         [int]$IntervalSec = 30,
-        [string]$ExpectedThumbprint = ''
+        [string]$ExpectedThumbprint = '',
+        [string[]]$InstanceNames = @()
     )
 
     $deadline = (Get-Date).AddSeconds($MaxWaitSec)
     $attempt = 0
     $wsParams = @{ TimeoutSec = 15 }
     if ($ExpectedThumbprint) { $wsParams['ExpectedThumbprint'] = $ExpectedThumbprint }
+    if ($InstanceNames.Count -gt 0) { $wsParams['InstanceNames'] = $InstanceNames }
 
     while ((Get-Date) -lt $deadline) {
         $attempt++
@@ -434,6 +528,387 @@ function Wait-ForWebServices {
         Start-Sleep -Seconds $IntervalSec
     }
     Write-Warning "Timeout ($MaxWaitSec s): alcuni servizi non rispondono."
+    return $results
+}
+
+# ============================================================
+# Helper: snapshot netsh http sslcert bindings (port-level SSL)
+# ============================================================
+function Get-SslCertBindingSnapshot {
+    param(
+        [string]$Thumbprint = ""
+    )
+
+    $snapshot = @()
+    $thumbNorm = if ($Thumbprint) { ($Thumbprint -replace '\s', '').ToUpper() } else { "" }
+
+    try {
+        $output = netsh http show sslcert 2>&1 | Out-String
+        # Parse netsh output into binding blocks
+        $blocks = $output -split '(?=\s*IP:port\s+:|\s*Hostname:port\s+:)'
+
+        foreach ($block in $blocks) {
+            if ($block -notmatch '(IP:port|Hostname:port)\s*:\s*(.+)') { continue }
+            $endpoint = $Matches[2].Trim()
+            $isHostnamePort = $block -match 'Hostname:port'
+
+            $hash = ''
+            if ($block -match 'Certificate Hash\s*:\s*([0-9a-fA-F]+)') {
+                $hash = $Matches[1].Trim().ToUpper()
+            }
+
+            $appId = ''
+            if ($block -match 'Application ID\s*:\s*(\{[^}]+\})') {
+                $appId = $Matches[1].Trim()
+            }
+
+            $storeName = $null
+            if ($block -match 'Certificate Store Name\s*:\s*(\S+)') {
+                $raw = $Matches[1].Trim()
+                if ($raw -ne '(null)') { $storeName = $raw }
+            }
+
+            # If filtering by thumbprint, only include matching bindings
+            if ($thumbNorm -and $hash -ne $thumbNorm) { continue }
+
+            $snapshot += [PSCustomObject]@{
+                Endpoint       = $endpoint
+                IsHostnamePort = $isHostnamePort
+                CertHash       = $hash
+                AppId          = $appId
+                StoreName      = $storeName
+            }
+        }
+    }
+    catch {
+        Write-Warning "Errore snapshot SSL bindings: $($_.Exception.Message)"
+    }
+
+    return $snapshot
+}
+
+# ============================================================
+# Helper: verify netsh SSL bindings post-update
+# ============================================================
+function Test-SslCertBindings {
+    param(
+        [string]$ExpectedThumbprint,
+        [array]$Snapshot
+    )
+
+    if (-not $Snapshot -or $Snapshot.Count -eq 0) { return @() }
+
+    $expectedNorm = ($ExpectedThumbprint -replace '\s', '').ToUpper()
+    $errors = @()
+
+    try {
+        $currentSnapshot = Get-SslCertBindingSnapshot
+    }
+    catch {
+        return @("Impossibile leggere SSL bindings correnti: $($_.Exception.Message)")
+    }
+
+    foreach ($snap in $Snapshot) {
+        $current = $currentSnapshot | Where-Object { $_.Endpoint -eq $snap.Endpoint }
+        if (-not $current) {
+            $errors += "SSL binding $($snap.Endpoint) : MANCANTE (era $($snap.CertHash))"
+            continue
+        }
+        if ($current.CertHash -ne $expectedNorm) {
+            $errors += "SSL binding $($snap.Endpoint) : hash $($current.CertHash) (atteso $expectedNorm)"
+        }
+    }
+
+    return $errors
+}
+
+# ============================================================
+# Helper: repair netsh SSL bindings from snapshot
+# ============================================================
+function Repair-SslCertBindings {
+    param(
+        [array]$Snapshot,
+        [string]$NewThumbprint
+    )
+
+    if (-not $Snapshot -or $Snapshot.Count -eq 0) {
+        Write-Warning "Nessun snapshot SSL bindings disponibile per il ripristino."
+        return @()
+    }
+
+    $newNorm = ($NewThumbprint -replace '\s', '').ToUpper()
+    $results = @()
+
+    # Verify the cert exists in the store before attempting repairs
+    $cert = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+        Where-Object { ($_.Thumbprint -replace '\s', '').ToUpper() -eq $newNorm }
+    if (-not $cert) {
+        return @([PSCustomObject]@{ Endpoint = '*'; Action = 'Error'; Detail = "Certificato $newNorm non trovato nello store" })
+    }
+
+    # Get current state
+    try {
+        $currentBindings = Get-SslCertBindingSnapshot
+    }
+    catch {
+        return @([PSCustomObject]@{ Endpoint = '*'; Action = 'Error'; Detail = "Impossibile leggere bindings correnti: $($_.Exception.Message)" })
+    }
+
+    foreach ($snap in $Snapshot) {
+        $endpoint = $snap.Endpoint
+        $current = $currentBindings | Where-Object { $_.Endpoint -eq $endpoint }
+
+        if ($current -and $current.CertHash -eq $newNorm) {
+            $results += [PSCustomObject]@{ Endpoint = $endpoint; Action = 'OK'; Detail = 'Certificato corretto' }
+            continue
+        }
+
+        # Need to fix: delete existing (if any) then add with new cert
+        try {
+            if ($current) {
+                # Delete existing binding first (regardless of who owns it)
+                if ($current.IsHostnamePort) {
+                    $delOut = netsh http delete sslcert hostnameport="$endpoint" 2>&1
+                }
+                else {
+                    $delOut = netsh http delete sslcert ipport="$endpoint" 2>&1
+                }
+                Write-Host "  SSL Repair: rimosso binding $endpoint (era hash=$($current.CertHash), AppId=$($current.AppId))"
+            }
+
+            # Re-add with new cert hash
+            $appIdParam = if ($snap.AppId) { "appid=$($snap.AppId)" } else { "appid={00000000-0000-0000-0000-000000000000}" }
+            $addArgs = @("certhash=$newNorm", $appIdParam)
+            if ($snap.StoreName) { $addArgs += "certstorename=$($snap.StoreName)" }
+
+            if ($snap.IsHostnamePort) {
+                $addOut = netsh http add sslcert hostnameport="$endpoint" @addArgs 2>&1
+            }
+            else {
+                $addOut = netsh http add sslcert ipport="$endpoint" @addArgs 2>&1
+            }
+
+            $addOutStr = $addOut | Out-String
+            if ($LASTEXITCODE -ne 0 -or $addOutStr -match 'Error|errore') {
+                # Conflict: port may be occupied by a binding we didn't see (race) -- force delete + retry
+                Write-Warning "  SSL Repair: add fallito per $endpoint, tentativo force-delete + retry..."
+                if ($snap.IsHostnamePort) {
+                    $null = netsh http delete sslcert hostnameport="$endpoint" 2>&1
+                    $addOut2 = netsh http add sslcert hostnameport="$endpoint" @addArgs 2>&1
+                }
+                else {
+                    $null = netsh http delete sslcert ipport="$endpoint" 2>&1
+                    $addOut2 = netsh http add sslcert ipport="$endpoint" @addArgs 2>&1
+                }
+
+                $addOutStr2 = $addOut2 | Out-String
+                if ($LASTEXITCODE -ne 0 -or $addOutStr2 -match 'Error|errore') {
+                    $results += [PSCustomObject]@{ Endpoint = $endpoint; Action = 'Error'; Detail = "netsh add fallito anche dopo force-delete: $addOutStr2" }
+                    Write-Warning "  SSL Repair: errore ricreazione binding $endpoint anche dopo force-delete"
+                }
+                else {
+                    $action = if ($current) { 'ForceFixed' } else { 'ForceRecreated' }
+                    $results += [PSCustomObject]@{ Endpoint = $endpoint; Action = $action; Detail = "Binding ricreato dopo rimozione conflitto (certificato $newNorm)" }
+                    Write-Host "  SSL Repair: binding $endpoint $($action.ToLower()) dopo rimozione conflitto."
+                }
+            }
+            else {
+                $action = if ($current) { 'Fixed' } else { 'Recreated' }
+                $results += [PSCustomObject]@{ Endpoint = $endpoint; Action = $action; Detail = "Binding aggiornato con certificato $newNorm" }
+                Write-Host "  SSL Repair: binding $endpoint $($action.ToLower())."
+            }
+        }
+        catch {
+            $results += [PSCustomObject]@{ Endpoint = $endpoint; Action = 'Error'; Detail = "Errore: $($_.Exception.Message)" }
+            Write-Warning "  SSL Repair: errore binding $endpoint : $($_.Exception.Message)"
+        }
+    }
+
+    return $results
+}
+
+# ============================================================
+# Helper: snapshot netsh http urlacl reservations (BC ports)
+# ============================================================
+function Get-UrlAclSnapshot {
+    param(
+        [string[]]$InstanceNames = @()
+    )
+
+    $snapshot = @()
+
+    try {
+        $output = netsh http show urlacl 2>&1 | Out-String
+
+        # Parse blocks: each starts with "    Reserved URL"
+        $blocks = $output -split '(?=\s+Reserved URL\s+:)'
+
+        foreach ($block in $blocks) {
+            if ($block -notmatch 'Reserved URL\s*:\s*(.+)') { continue }
+            $url = $Matches[1].Trim()
+
+            # If filtering by instance names, check URL path contains /<ShortName>/
+            # BC instance names come as "MicrosoftDynamicsNavServer$PROD_NUP" but
+            # URL ACLs use the short name "/PROD_NUP/" -- extract after "$" if present
+            if ($InstanceNames.Count -gt 0) {
+                $matched = $false
+                foreach ($inst in $InstanceNames) {
+                    $shortName = if ($inst -match '\$(.+)$') { $Matches[1] } else { $inst }
+                    if ($url -match "/$([regex]::Escape($shortName))/") {
+                        $matched = $true
+                        break
+                    }
+                }
+                if (-not $matched) { continue }
+            }
+
+            $sddl = ''
+            if ($block -match 'SDDL:\s*(.+)') {
+                $sddl = $Matches[1].Trim()
+            }
+
+            $snapshot += [PSCustomObject]@{
+                Url  = $url
+                SDDL = $sddl
+            }
+        }
+    }
+    catch {
+        Write-Warning "Errore snapshot URL ACL: $($_.Exception.Message)"
+    }
+
+    return $snapshot
+}
+
+# ============================================================
+# Helper: verify URL ACL reservations still exist
+# ============================================================
+function Test-UrlAcls {
+    param(
+        [array]$Snapshot
+    )
+
+    if (-not $Snapshot -or $Snapshot.Count -eq 0) { return @() }
+
+    $errors = @()
+
+    try {
+        $currentSnapshot = Get-UrlAclSnapshot
+    }
+    catch {
+        return @("Impossibile leggere URL ACL correnti: $($_.Exception.Message)")
+    }
+
+    $currentUrls = $currentSnapshot | ForEach-Object { $_.Url }
+
+    foreach ($snap in $Snapshot) {
+        if ($snap.Url -notin $currentUrls) {
+            $errors += "URL ACL MANCANTE: $($snap.Url)"
+        }
+    }
+
+    return $errors
+}
+
+# ============================================================
+# Helper: repair missing URL ACL reservations from snapshot
+# ============================================================
+function Repair-UrlAcls {
+    param(
+        [array]$Snapshot
+    )
+
+    if (-not $Snapshot -or $Snapshot.Count -eq 0) {
+        Write-Warning "Nessun snapshot URL ACL disponibile per il ripristino."
+        return @()
+    }
+
+    $results = @()
+
+    # Get current state
+    try {
+        $currentSnapshot = Get-UrlAclSnapshot
+    }
+    catch {
+        return @([PSCustomObject]@{ Url = '*'; Action = 'Error'; Detail = "Impossibile leggere URL ACL correnti: $($_.Exception.Message)" })
+    }
+
+    # Build lookup: URL -> current SDDL
+    $currentMap = @{}
+    foreach ($cur in $currentSnapshot) { $currentMap[$cur.Url] = $cur.SDDL }
+
+    foreach ($snap in $Snapshot) {
+        if ($currentMap.ContainsKey($snap.Url)) {
+            # URL ACL exists -- verify SDDL matches
+            $curSddl = $currentMap[$snap.Url]
+            if ($snap.SDDL -and $curSddl -and $curSddl -ne $snap.SDDL) {
+                # SDDL mismatch -- delete and recreate with correct SDDL
+                Write-Host "  URL ACL Repair: SDDL diverso per $($snap.Url), correzione..."
+                try {
+                    $null = netsh http delete urlacl url="$($snap.Url)" 2>&1
+                    $addOut = netsh http add urlacl url="$($snap.Url)" sddl="$($snap.SDDL)" 2>&1
+                    $addOutStr = $addOut | Out-String
+                    if ($LASTEXITCODE -ne 0 -or $addOutStr -match 'Error|errore') {
+                        $results += [PSCustomObject]@{ Url = $snap.Url; Action = 'Error'; Detail = "Correzione SDDL fallita: $addOutStr" }
+                    }
+                    else {
+                        $results += [PSCustomObject]@{ Url = $snap.Url; Action = 'Fixed'; Detail = "SDDL corretto da $curSddl a $($snap.SDDL)" }
+                    }
+                }
+                catch {
+                    $results += [PSCustomObject]@{ Url = $snap.Url; Action = 'Error'; Detail = "Errore correzione SDDL: $($_.Exception.Message)" }
+                }
+            }
+            else {
+                $results += [PSCustomObject]@{ Url = $snap.Url; Action = 'OK'; Detail = 'Presente' }
+            }
+            continue
+        }
+
+        # Missing -- recreate
+        try {
+            if ($snap.SDDL) {
+                $addOut = netsh http add urlacl url="$($snap.Url)" sddl="$($snap.SDDL)" 2>&1
+            }
+            else {
+                # Fallback: grant NETWORK SERVICE listen permission
+                $addOut = netsh http add urlacl url="$($snap.Url)" user="NT AUTHORITY\NETWORK SERVICE" listen=yes 2>&1
+            }
+
+            $addOutStr = $addOut | Out-String
+            if ($LASTEXITCODE -ne 0 -or $addOutStr -match 'Error|errore') {
+                # Conflict: URL ACL might exist from a different source -- force delete + retry
+                Write-Warning "  URL ACL Repair: add fallito per $($snap.Url), tentativo force-delete + retry..."
+                $null = netsh http delete urlacl url="$($snap.Url)" 2>&1
+
+                if ($snap.SDDL) {
+                    $addOut2 = netsh http add urlacl url="$($snap.Url)" sddl="$($snap.SDDL)" 2>&1
+                }
+                else {
+                    $addOut2 = netsh http add urlacl url="$($snap.Url)" user="NT AUTHORITY\NETWORK SERVICE" listen=yes 2>&1
+                }
+
+                $addOutStr2 = $addOut2 | Out-String
+                if ($LASTEXITCODE -ne 0 -or $addOutStr2 -match 'Error|errore') {
+                    $results += [PSCustomObject]@{ Url = $snap.Url; Action = 'Error'; Detail = "netsh add urlacl fallito anche dopo force-delete: $addOutStr2" }
+                    Write-Warning "  URL ACL Repair: errore ricreazione $($snap.Url) anche dopo force-delete"
+                }
+                else {
+                    $results += [PSCustomObject]@{ Url = $snap.Url; Action = 'ForceRecreated'; Detail = "URL ACL ricreata dopo rimozione conflitto" }
+                    Write-Host "  URL ACL Repair: ricreata $($snap.Url) dopo rimozione conflitto"
+                }
+            }
+            else {
+                $results += [PSCustomObject]@{ Url = $snap.Url; Action = 'Recreated'; Detail = "URL ACL ricreata" }
+                Write-Host "  URL ACL Repair: ricreata $($snap.Url)"
+            }
+        }
+        catch {
+            $results += [PSCustomObject]@{ Url = $snap.Url; Action = 'Error'; Detail = "Errore: $($_.Exception.Message)" }
+            Write-Warning "  URL ACL Repair: errore $($snap.Url) : $($_.Exception.Message)"
+        }
+    }
+
     return $results
 }
 
@@ -501,6 +976,178 @@ function Test-BCPostUpdate {
     }
 
     return $errors
+}
+
+# ============================================================
+# Helper: snapshot IIS HTTPS bindings (pre-update safety net)
+# ============================================================
+function Get-IISBindingSnapshot {
+    param(
+        [string]$SiteName = "Microsoft Dynamics 365 Business Central Web Client"
+    )
+
+    $snapshot = @()
+
+    try {
+        if (-not ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq "Microsoft.Web.Administration" })) {
+            $dllPath = "C:\Windows\System32\inetsrv\Microsoft.Web.Administration.dll"
+            if (Test-Path $dllPath) { [void][Reflection.Assembly]::LoadFrom($dllPath) }
+            else { Write-Warning "Microsoft.Web.Administration.dll non trovata (snapshot)."; return $snapshot }
+        }
+
+        $sm = New-Object Microsoft.Web.Administration.ServerManager
+        $site = $sm.Sites[$SiteName]
+        if (-not $site) { Write-Warning "Sito '$SiteName' non trovato in IIS (snapshot)."; return $snapshot }
+
+        foreach ($binding in $site.Bindings) {
+            if ($binding.Protocol -ne 'https') { continue }
+            $thumb = ''
+            if ($binding.CertificateHash) {
+                $thumb = ([System.BitConverter]::ToString($binding.CertificateHash) -replace '-', '').ToUpper()
+            }
+            $snapshot += [PSCustomObject]@{
+                BindingInformation   = $binding.BindingInformation
+                CertificateStoreName = $(if ($binding.CertificateStoreName) { $binding.CertificateStoreName } else { 'My' })
+                SslFlags             = $(try { $binding.SslFlags } catch { 0 })
+                Thumbprint           = $thumb
+            }
+        }
+    }
+    catch {
+        Write-Warning "Errore snapshot IIS: $($_.Exception.Message)"
+    }
+
+    return $snapshot
+}
+
+# ============================================================
+# Helper: repair missing/broken IIS HTTPS bindings from snapshot
+# ============================================================
+function Repair-IISBindings {
+    param(
+        [array]$Snapshot,
+        [string]$NewThumbprint,
+        [string]$SiteName = "Microsoft Dynamics 365 Business Central Web Client"
+    )
+
+    if (-not $Snapshot -or $Snapshot.Count -eq 0) {
+        Write-Warning "Nessun snapshot IIS disponibile per il ripristino."
+        return @()
+    }
+
+    $newNorm = ($NewThumbprint -replace '\s', '').ToUpper()
+    $results = @()
+
+    try {
+        if (-not ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq "Microsoft.Web.Administration" })) {
+            $dllPath = "C:\Windows\System32\inetsrv\Microsoft.Web.Administration.dll"
+            if (Test-Path $dllPath) { [void][Reflection.Assembly]::LoadFrom($dllPath) }
+            else { return @([PSCustomObject]@{ Binding = '*'; Action = 'Error'; Detail = 'DLL non trovata' }) }
+        }
+
+        $cert = Get-ChildItem Cert:\LocalMachine\My -ErrorAction Stop |
+            Where-Object { ($_.Thumbprint -replace '\s', '').ToUpper() -eq $newNorm }
+        if (-not $cert) {
+            return @([PSCustomObject]@{ Binding = '*'; Action = 'Error'; Detail = "Certificato $newNorm non trovato nello store" })
+        }
+        $newHash = $cert.GetCertHash()
+
+        $sm = New-Object Microsoft.Web.Administration.ServerManager
+        $site = $sm.Sites[$SiteName]
+        if (-not $site) {
+            return @([PSCustomObject]@{ Binding = $SiteName; Action = 'Error'; Detail = 'Sito non trovato in IIS' })
+        }
+
+        foreach ($snap in $Snapshot) {
+            $bindingInfo = $snap.BindingInformation
+            $existing = $site.Bindings | Where-Object {
+                $_.Protocol -eq 'https' -and $_.BindingInformation -eq $bindingInfo
+            }
+
+            if ($existing) {
+                # Binding exists -- verify cert is correct
+                $currentThumb = ''
+                if ($existing.CertificateHash) {
+                    $currentThumb = ([System.BitConverter]::ToString($existing.CertificateHash) -replace '-', '').ToUpper()
+                }
+                if ($currentThumb -eq $newNorm) {
+                    $results += [PSCustomObject]@{ Binding = $bindingInfo; Action = 'OK'; Detail = 'Certificato corretto' }
+                }
+                else {
+                    try {
+                        $existing.CertificateHash = $newHash
+                        $existing.CertificateStoreName = 'My'
+                        $sm.CommitChanges()
+                        $results += [PSCustomObject]@{ Binding = $bindingInfo; Action = 'Fixed'; Detail = "Certificato corretto da $currentThumb a $newNorm" }
+                        Write-Host "  Repair: binding $bindingInfo certificato corretto."
+                    }
+                    catch {
+                        $results += [PSCustomObject]@{ Binding = $bindingInfo; Action = 'Error'; Detail = "Errore fix certificato: $($_.Exception.Message)" }
+                    }
+                }
+            }
+            else {
+                # Binding missing -- recreate it
+                try {
+                    Write-Host "  Repair: ricreazione binding mancante $bindingInfo..."
+                    $newBinding = $site.Bindings.Add($bindingInfo, $newHash, 'My', $snap.SslFlags)
+                    $sm.CommitChanges()
+                    $results += [PSCustomObject]@{ Binding = $bindingInfo; Action = 'Recreated'; Detail = "Binding ricreato con certificato $newNorm" }
+                    Write-Host "  Repair: binding $bindingInfo ricreato."
+                }
+                catch {
+                    # Conflict: another site may have a binding on the same port
+                    $conflictMsg = $_.Exception.Message
+                    Write-Warning "  Repair: errore ricreazione $bindingInfo ($conflictMsg). Ricerca conflitto..."
+
+                    # Try to find and remove the conflicting binding from other sites
+                    $conflictResolved = $false
+                    try {
+                        $sm2 = New-Object Microsoft.Web.Administration.ServerManager
+                        foreach ($otherSite in $sm2.Sites) {
+                            if ($otherSite.Name -eq $SiteName) { continue }
+                            $conflicting = $otherSite.Bindings | Where-Object {
+                                $_.Protocol -eq 'https' -and $_.BindingInformation -eq $bindingInfo
+                            }
+                            if ($conflicting) {
+                                Write-Host "  Repair: conflitto trovato su sito '$($otherSite.Name)' -- rimozione binding..."
+                                $otherSite.Bindings.Remove($conflicting)
+                                $sm2.CommitChanges()
+                                $conflictResolved = $true
+                                break
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Warning "  Repair: errore ricerca conflitto: $($_.Exception.Message)"
+                    }
+
+                    if ($conflictResolved) {
+                        # Retry with fresh ServerManager
+                        try {
+                            $sm3 = New-Object Microsoft.Web.Administration.ServerManager
+                            $site3 = $sm3.Sites[$SiteName]
+                            $null = $site3.Bindings.Add($bindingInfo, $newHash, 'My', $snap.SslFlags)
+                            $sm3.CommitChanges()
+                            $results += [PSCustomObject]@{ Binding = $bindingInfo; Action = 'ForceRecreated'; Detail = "Binding ricreato dopo rimozione conflitto da altro sito" }
+                            Write-Host "  Repair: binding $bindingInfo ricreato dopo rimozione conflitto."
+                        }
+                        catch {
+                            $results += [PSCustomObject]@{ Binding = $bindingInfo; Action = 'Error'; Detail = "Errore retry dopo rimozione conflitto: $($_.Exception.Message)" }
+                        }
+                    }
+                    else {
+                        $results += [PSCustomObject]@{ Binding = $bindingInfo; Action = 'Error'; Detail = "Errore ricreazione: $conflictMsg (nessun conflitto cross-site trovato)" }
+                    }
+                }
+            }
+        }
+    }
+    catch {
+        $results += [PSCustomObject]@{ Binding = '*'; Action = 'Error'; Detail = "Errore generale repair: $($_.Exception.Message)" }
+    }
+
+    return $results
 }
 
 # ============================================================
@@ -752,6 +1399,32 @@ function Main {
         $newThumb = $installedCert.Thumbprint
         Write-Host "Installato: $($installedCert.Subject) [$newThumb]"
 
+        # ---- Snapshot SSL cert bindings BEFORE BC update (safety net) ----
+        Write-Host "`nSnapshot SSL bindings (netsh http sslcert) per vecchio certificato..."
+        $sslSnapshot = Get-SslCertBindingSnapshot -Thumbprint $oldThumb
+        if ($sslSnapshot.Count -gt 0) {
+            Write-Host ("  Snapshot acquisito: {0} SSL binding(s) per porta." -f $sslSnapshot.Count)
+            $sslSnapshot | ForEach-Object { Write-Host ("    {0} -> {1}" -f $_.Endpoint, $_.CertHash) }
+        }
+        else {
+            Write-Host "  Nessun SSL binding trovato per il vecchio certificato."
+        }
+
+        # ---- Snapshot URL ACL reservations BEFORE BC update (safety net) ----
+        Write-Host "`nSnapshot URL ACL (netsh http urlacl) per istanze BC..."
+        $urlAclSnapshot = Get-UrlAclSnapshot -InstanceNames $expiring.Group.Instances
+        if ($urlAclSnapshot.Count -gt 0) {
+            Write-Host ("  Snapshot acquisito: {0} URL ACL reservation(s)." -f $urlAclSnapshot.Count)
+            $urlAclSnapshot | ForEach-Object { Write-Host ("    {0}" -f $_.Url) }
+        }
+        else {
+            Write-Host "  Nessuna URL ACL trovata per le istanze BC."
+        }
+
+        # ---- Persist snapshots to disk (safety net for crash recovery) ----
+        $null = Save-BindingSnapshot -OldThumbprint $oldThumb -NewThumbprint $newThumb `
+            -SslSnapshot $sslSnapshot -UrlAclSnapshot $urlAclSnapshot
+
         # ---- Step 6: Update BC (only instances using the old certificate) ----
         Write-Host "[6] Aggiornamento istanze Business Central (vecchio thumb: $oldThumb)..."
         $bcResults = Update-BCServiceCert -NewThumbprint $newThumb -OldThumbprint $oldThumb
@@ -788,8 +1461,92 @@ function Main {
             Write-Host "Verifica BC OK: thumbprint e stato Running confermati."
         }
 
+        # --- Post-BC SSL binding verification + repair ---
+        if ($sslSnapshot.Count -gt 0) {
+            Write-Host "`nVerifica SSL bindings per porta (netsh http sslcert)..."
+            $sslErrors = Test-SslCertBindings -ExpectedThumbprint $newThumb -Snapshot $sslSnapshot
+            if ($sslErrors -and $sslErrors.Count -gt 0) {
+                Write-Warning "SSL bindings non corretti: $($sslErrors -join '; ')"
+                Write-Host "Tentativo repair SSL bindings da snapshot..."
+                $sslRepairResults = Repair-SslCertBindings -Snapshot $sslSnapshot -NewThumbprint $newThumb
+                if ($sslRepairResults) { $sslRepairResults | Format-Table -AutoSize }
+
+                $sslRepairErrors = @($sslRepairResults | Where-Object { $_.Action -eq 'Error' })
+                $sslRepairFixed = @($sslRepairResults | Where-Object { $_.Action -in @('Fixed', 'Recreated', 'ForceFixed', 'ForceRecreated') })
+
+                if ($sslRepairFixed.Count -gt 0) {
+                    Write-Host "SSL Repair: corretti/ricreati $($sslRepairFixed.Count) binding."
+                    # Re-verify after repair
+                    $sslErrors2 = Test-SslCertBindings -ExpectedThumbprint $newThumb -Snapshot $sslSnapshot
+                    if ($sslErrors2 -and $sslErrors2.Count -gt 0) {
+                        $errDetail = $sslErrors2 -join "; "
+                        Send-FailureNotification -Context "Verifica SSL bindings porta" -ErrorDetail "Fallita anche dopo repair: $errDetail"
+                        $hadPipelineErrors = $true
+                    }
+                    else {
+                        Write-Host "SSL bindings porta verificati dopo repair."
+                    }
+                }
+                elseif ($sslRepairErrors.Count -gt 0) {
+                    $errDetail = ($sslErrors + ($sslRepairErrors | ForEach-Object { $_.Detail })) -join "; "
+                    Send-FailureNotification -Context "Verifica SSL bindings porta" -ErrorDetail "Repair fallito: $errDetail"
+                    $hadPipelineErrors = $true
+                }
+            }
+            else {
+                Write-Host "Verifica SSL bindings porta: tutti corretti."
+            }
+        }
+
+        # --- Post-BC URL ACL verification + repair ---
+        if ($urlAclSnapshot.Count -gt 0) {
+            Write-Host "`nVerifica URL ACL reservations (netsh http urlacl)..."
+            $urlAclErrors = Test-UrlAcls -Snapshot $urlAclSnapshot
+            if ($urlAclErrors -and $urlAclErrors.Count -gt 0) {
+                Write-Warning "URL ACL mancanti: $($urlAclErrors -join '; ')"
+                Write-Host "Tentativo repair URL ACL da snapshot..."
+                $urlAclRepairResults = Repair-UrlAcls -Snapshot $urlAclSnapshot
+                if ($urlAclRepairResults) { $urlAclRepairResults | Format-Table -AutoSize }
+
+                $urlAclRepairErrors = @($urlAclRepairResults | Where-Object { $_.Action -eq 'Error' })
+                if ($urlAclRepairErrors.Count -gt 0) {
+                    $errDetail = ($urlAclErrors + ($urlAclRepairErrors | ForEach-Object { $_.Detail })) -join "; "
+                    Send-FailureNotification -Context "Verifica URL ACL" -ErrorDetail "Repair fallito: $errDetail"
+                    $hadPipelineErrors = $true
+                }
+                else {
+                    # Re-verify
+                    $urlAclErrors2 = Test-UrlAcls -Snapshot $urlAclSnapshot
+                    if ($urlAclErrors2 -and $urlAclErrors2.Count -gt 0) {
+                        Send-FailureNotification -Context "Verifica URL ACL" -ErrorDetail "Fallita anche dopo repair: $($urlAclErrors2 -join '; ')"
+                        $hadPipelineErrors = $true
+                    }
+                    else {
+                        Write-Host "URL ACL verificate dopo repair."
+                    }
+                }
+            }
+            else {
+                Write-Host "Verifica URL ACL: tutte presenti."
+            }
+        }
+
         # ---- Step 7: Update IIS (only bindings using the old certificate) ----
         Write-Host "`n[7] Aggiornamento binding IIS (vecchio thumb: $oldThumb)..."
+
+        # Snapshot HTTPS bindings BEFORE update (safety net for repair)
+        $iisSnapshot = Get-IISBindingSnapshot -SiteName $iisSiteName
+        if ($iisSnapshot.Count -gt 0) {
+            Write-Host ("  Snapshot acquisito: {0} binding HTTPS." -f $iisSnapshot.Count)
+        }
+        else {
+            Write-Warning "  Nessun binding HTTPS trovato per lo snapshot."
+        }
+
+        # Update persisted snapshot with IIS data
+        $null = Save-BindingSnapshot -OldThumbprint $oldThumb -NewThumbprint $newThumb `
+            -SslSnapshot $sslSnapshot -UrlAclSnapshot $urlAclSnapshot -IISSnapshot $iisSnapshot
+
         try {
             $iisResults = Update-IISBinding -NewThumbprint $newThumb -OldThumbprint $oldThumb -SiteName $iisSiteName -RestartIIS:$iisRestart
             if ($iisResults) { $iisResults | Format-Table -AutoSize }
@@ -817,9 +1574,36 @@ function Main {
             Start-Sleep -Seconds 10
             $iisVerifyErrors2 = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName
             if ($iisVerifyErrors2) {
-                $errDetail = $iisVerifyErrors2 -join "; "
-                Send-FailureNotification -Context "Verifica post-aggiornamento IIS" -ErrorDetail "Fallita anche dopo retry con restart: $errDetail"
-                $hadPipelineErrors = $true
+                # Last resort: repair from snapshot (recreates missing bindings)
+                Write-Host "Tentativo repair binding IIS da snapshot..."
+                $repairResults = Repair-IISBindings -Snapshot $iisSnapshot -NewThumbprint $newThumb -SiteName $iisSiteName
+                if ($repairResults) { $repairResults | Format-Table -AutoSize }
+
+                $repairErrors = @($repairResults | Where-Object { $_.Action -eq 'Error' })
+                $repairSuccess = @($repairResults | Where-Object { $_.Action -in @('Fixed', 'Recreated', 'ForceRecreated') })
+
+                if ($repairSuccess.Count -gt 0) {
+                    Write-Host "Repair IIS: corretti/ricreati $($repairSuccess.Count) binding."
+                    # Restart IIS after repair to ensure bindings are active
+                    try { iisreset /noforce | Out-Null; Write-Host "IIS riavviato dopo repair." } catch { Write-Warning "iisreset fallito: $($_.Exception.Message)" }
+                    Start-Sleep -Seconds 5
+
+                    # Final verification after repair
+                    $iisVerifyErrors3 = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName
+                    if ($iisVerifyErrors3) {
+                        $errDetail = $iisVerifyErrors3 -join "; "
+                        Send-FailureNotification -Context "Verifica post-aggiornamento IIS" -ErrorDetail "Fallita anche dopo repair da snapshot: $errDetail"
+                        $hadPipelineErrors = $true
+                    }
+                    else {
+                        Write-Host "Repair IIS riuscito: tutti i binding verificati."
+                    }
+                }
+                else {
+                    $errDetail = ($iisVerifyErrors2 + ($repairErrors | ForEach-Object { $_.Detail })) -join "; "
+                    Send-FailureNotification -Context "Verifica post-aggiornamento IIS" -ErrorDetail "Fallita anche dopo retry e repair: $errDetail"
+                    $hadPipelineErrors = $true
+                }
             }
             else {
                 Write-Host "Remediation IIS riuscita dopo retry."
@@ -827,25 +1611,6 @@ function Main {
         }
         else {
             Write-Host "Verifica IIS OK: binding aggiornati correttamente."
-        }
-
-        # Smoke test with polling + SSL verification (servizi possono metterci fino a 10 min)
-        Write-Host "`nAttesa servizi web post-aggiornamento (fino a 10 min)..."
-        $wsResults = Wait-ForWebServices -MaxWaitSec 600 -IntervalSec 30 -ExpectedThumbprint $newThumb
-        if ($wsResults) { $wsResults | Format-Table -AutoSize }
-
-        $wsErrors = if ($wsResults) { @($wsResults | Where-Object { $_.Status -eq 'ERROR' }) } else { @() }
-        if ($wsErrors.Count -gt 0) {
-            $wsErrText = ($wsErrors | ForEach-Object { "$($_.Instance) [$($_.Url)]: $($_.Error)" }) -join "; "
-            Send-FailureNotification -Context "Verifica servizi web post-aggiornamento" -ErrorDetail $wsErrText
-            $hadPipelineErrors = $true
-        }
-
-        $sslMismatches = if ($wsResults) { @($wsResults | Where-Object { $_.SslMatch -eq $false }) } else { @() }
-        if ($sslMismatches.Count -gt 0) {
-            $sslErrText = ($sslMismatches | ForEach-Object { "$($_.Instance) [$($_.Url)]: SSL cert $($_.SslThumbprint) (atteso $newThumb)" }) -join "; "
-            Send-FailureNotification -Context "Verifica SSL post-aggiornamento" -ErrorDetail $sslErrText
-            $hadPipelineErrors = $true
         }
 
         # Per-cert completion notification
