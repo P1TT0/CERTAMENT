@@ -668,10 +668,10 @@ function Repair-SslCertBindings {
             if ($current) {
                 # Delete existing binding first (regardless of who owns it)
                 if ($current.IsHostnamePort) {
-                    $delOut = netsh http delete sslcert hostnameport="$endpoint" 2>&1
+                    $null = netsh http delete sslcert hostnameport="$endpoint" 2>&1
                 }
                 else {
-                    $delOut = netsh http delete sslcert ipport="$endpoint" 2>&1
+                    $null = netsh http delete sslcert ipport="$endpoint" 2>&1
                 }
                 Write-Host "  SSL Repair: rimosso binding $endpoint (era hash=$($current.CertHash), AppId=$($current.AppId))"
             }
@@ -1090,7 +1090,7 @@ function Repair-IISBindings {
                 # Binding missing -- recreate it
                 try {
                     Write-Host "  Repair: ricreazione binding mancante $bindingInfo..."
-                    $newBinding = $site.Bindings.Add($bindingInfo, $newHash, 'My', $snap.SslFlags)
+                    $null = $site.Bindings.Add($bindingInfo, $newHash, 'My', $snap.SslFlags)
                     $sm.CommitChanges()
                     $results += [PSCustomObject]@{ Binding = $bindingInfo; Action = 'Recreated'; Detail = "Binding ricreato con certificato $newNorm" }
                     Write-Host "  Repair: binding $bindingInfo ricreato."
