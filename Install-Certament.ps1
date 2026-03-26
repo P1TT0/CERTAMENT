@@ -116,7 +116,7 @@ function Write-BannerLines {
     }
     Write-Host ""
     Write-Host "  $hLine" -ForegroundColor DarkGray
-    Write-Host "   Automated Certificate Manager for BC + IIS                              v1.0" -ForegroundColor Gray
+    Write-Host "   Automated Certificate Manager for BC + IIS                              v1.0.0.0.0.0.0.0.0.1" -ForegroundColor Gray
     Write-Host "   $env:COMPUTERNAME  $([char]0x00B7)  $(Get-Date -Format 'yyyy-MM-dd HH:mm')" -ForegroundColor DarkGray
     Write-Host "  $hLine" -ForegroundColor DarkGray
     Write-Host ''
@@ -268,7 +268,7 @@ function Write-AnimatedBanner {
     Write-Host ""
 
     # --- Phase 6: Typewriter info ---
-    $infoText   = "   Automated Certificate Manager for BC + IIS                              v1.0"
+    $infoText   = "   Automated Certificate Manager for BC + IIS                              v1.0.0.0.0.0.0.0.0.1"
     $serverText = "   $env:COMPUTERNAME  $([char]0x00B7)  $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
 
     foreach ($ch in $infoText.ToCharArray()) {
