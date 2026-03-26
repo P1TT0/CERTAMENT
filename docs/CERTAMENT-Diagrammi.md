@@ -4,7 +4,7 @@
 
 ```mermaid
 flowchart TD
-    START([🔧 CERTAMENT Avvio]) --> ADMIN{Privilegi Admin?}
+    START([CERTAMENT Avvio]) --> ADMIN{Privilegi Admin?}
     ADMIN -->|No| ELEVATE[Rilancio con elevazione] --> END_EXIT([Uscita])
     ADMIN -->|Sì| MUTEX{Mutex libero?}
     MUTEX -->|No| END_ALREADY([Altra istanza attiva - Uscita])
@@ -20,7 +20,7 @@ flowchart TD
 
     HAS_CERTS -->|Sì| STEP2["[2] Verifica scadenza<br/>Get-CertDetails per ogni cert"]
     STEP2 --> EXPIRING{Cert in scadenza<br/>entro soglia?}
-    EXPIRING -->|No| HB_HEALTHY[/Heartbeat: Healthy/] --> END_OK([✅ Uscita OK])
+    EXPIRING -->|No| HB_HEALTHY[/Heartbeat: Healthy/] --> END_OK([Uscita OK])
 
     EXPIRING -->|Sì| LOOP_START["Per ogni certificato in scadenza..."]
 
@@ -101,11 +101,11 @@ flowchart TD
 ```
 
 **Legenda colori:**
-- 🟢 **Verde**: Avvio / successo / completamento
-- 🔴 **Rosso**: Errori / uscita con errore
-- 🔵 **Blu**: Notifiche al cliente
-- 🟣 **Viola**: Heartbeat Azure
-- 🟠 **Arancione**: Warning / blocco non critico
+- **Verde**: Avvio / successo / completamento
+- **Rosso**: Errori / uscita con errore
+- **Blu**: Notifiche al cliente
+- **Viola**: Heartbeat Azure
+- **Arancione**: Warning / blocco non critico
 
 ---
 
@@ -114,24 +114,24 @@ flowchart TD
 ```mermaid
 flowchart LR
     subgraph BEFORE["PRIMA dell'aggiornamento"]
-        SNAP_SSL["📸 Snapshot<br/>netsh http sslcert<br/>(porte: 443, 7065, 7067, 7068)"]
-        SNAP_ACL["📸 Snapshot<br/>netsh http urlacl<br/>(URL BC instances)"]
-        SNAP_IIS["📸 Snapshot<br/>IIS Bindings HTTPS<br/>(sito BC Web Client)"]
-        SNAP_DISK["💾 Salvataggio JSON<br/>logs/snapshots/"]
+        SNAP_SSL["Snapshot<br/>netsh http sslcert<br/>(porte: 443, 7065, 7067, 7068)"]
+        SNAP_ACL["Snapshot<br/>netsh http urlacl<br/>(URL BC instances)"]
+        SNAP_IIS["Snapshot<br/>IIS Bindings HTTPS<br/>(sito BC Web Client)"]
+        SNAP_DISK["Salvataggio JSON<br/>logs/snapshots/"]
     end
 
     subgraph UPDATE["AGGIORNAMENTO"]
-        BC_UPDATE["🔄 Update BC<br/>Set-NAVServerConfiguration<br/>+ Restart servizi"]
-        IIS_UPDATE["🔄 Update IIS<br/>Binding HTTPS"]
+        BC_UPDATE["Update BC<br/>Set-NAVServerConfiguration<br/>+ Restart servizi"]
+        IIS_UPDATE["Update IIS<br/>Binding HTTPS"]
     end
 
     subgraph AFTER["DOPO: Verifica + Repair"]
-        CHECK_SSL{"✅ SSL OK?"}
-        CHECK_ACL{"✅ ACL OK?"}
-        CHECK_IIS{"✅ IIS OK?"}
-        REPAIR_SSL["🔧 Repair SSL<br/>da snapshot"]
-        REPAIR_ACL["🔧 Repair ACL<br/>da snapshot"]
-        REPAIR_IIS["🔧 Repair IIS<br/>da snapshot"]
+        CHECK_SSL{"SSL OK?"}
+        CHECK_ACL{"ACL OK?"}
+        CHECK_IIS{"IIS OK?"}
+        REPAIR_SSL["Repair SSL<br/>da snapshot"]
+        REPAIR_ACL["Repair ACL<br/>da snapshot"]
+        REPAIR_IIS["Repair IIS<br/>da snapshot"]
     end
 
     SNAP_SSL --> SNAP_DISK
@@ -147,7 +147,7 @@ flowchart LR
     REPAIR_ACL --> IIS_UPDATE
     IIS_UPDATE --> CHECK_IIS
     CHECK_IIS -->|No| REPAIR_IIS
-    CHECK_IIS -->|Sì| DONE([✅ Completato])
+    CHECK_IIS -->|Sì| DONE([Completato])
     REPAIR_IIS --> DONE
 
     style BEFORE fill:#E3F2FD
@@ -164,17 +164,17 @@ flowchart TD
     EVENT["Evento CERTAMENT"] --> TYPE{Tipo evento?}
 
     TYPE -->|Cert in scadenza<br/>PFX mancante/invalido| CUST_CHECK{Webhook<br/>Customer<br/>configurato?}
-    CUST_CHECK -->|Sì| SEND_CUST["📤 Invio a Customer<br/>(Adaptive Card Teams)"]
-    CUST_CHECK -->|No| FALLBACK1["⚠️ Heartbeat: NotificationFailed<br/>+ Alert a Internal"]
+    CUST_CHECK -->|Sì| SEND_CUST["Invio a Customer<br/>(Adaptive Card Teams)"]
+    CUST_CHECK -->|No| FALLBACK1["Heartbeat: NotificationFailed<br/>+ Alert a Internal"]
 
     SEND_CUST --> CUST_OK{Invio OK?}
     CUST_OK -->|Sì| DONE([Fine])
-    CUST_OK -->|No| FALLBACK2["⚠️ Heartbeat: NotificationFailed<br/>+ Alert a Internal:<br/>'Notifica Customer fallita'"]
+    CUST_OK -->|No| FALLBACK2["Heartbeat: NotificationFailed<br/>+ Alert a Internal:<br/>'Notifica Customer fallita'"]
 
-    TYPE -->|Errore pipeline<br/>Aggiornamento completato<br/>Eccezione| SEND_INT["📤 Invio a Internal<br/>(Adaptive Card Teams)"]
+    TYPE -->|Errore pipeline<br/>Aggiornamento completato<br/>Eccezione| SEND_INT["Invio a Internal<br/>(Adaptive Card Teams)"]
     SEND_INT --> DONE
 
-    TYPE -->|Heartbeat fallito| HB_NOTIFY["📤 Invio a Internal<br/>(solo prima volta per run)"]
+    TYPE -->|Heartbeat fallito| HB_NOTIFY["Invio a Internal<br/>(solo prima volta per run)"]
     HB_NOTIFY --> DONE
 
     style SEND_CUST fill:#2196F3,color:white
@@ -189,13 +189,13 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    UPLOAD["📁 Cliente deposita<br/>certificato.pfx<br/>+ password.txt<br/>in C:\\_install"]
-    --> DETECT["🔍 CERTAMENT rileva<br/>PFX più recente"]
-    --> VALIDATE["✅ Validazione:<br/>non scaduto?<br/>più recente?"]
-    --> INSTALL["📥 Importazione<br/>LocalMachine\\My"]
-    --> APPLY["🔄 Applicazione su:<br/>BC + SSL + IIS"]
-    --> ARCHIVE["📦 PFX archiviato<br/>in installed/"]
-    --> CLEANUP["🗑️ password.txt<br/>eliminato"]
+    UPLOAD["Cliente deposita<br/>certificato.pfx<br/>+ password.txt<br/>in C:\\_install"]
+    --> DETECT["CERTAMENT rileva<br/>PFX più recente"]
+    --> VALIDATE["Validazione:<br/>non scaduto?<br/>più recente?"]
+    --> INSTALL["Importazione<br/>LocalMachine\\My"]
+    --> APPLY["Applicazione su:<br/>BC + SSL + IIS"]
+    --> ARCHIVE["PFX archiviato<br/>in installed/"]
+    --> CLEANUP["password.txt<br/>eliminato"]
 
     style UPLOAD fill:#E3F2FD
     style ARCHIVE fill:#E8F5E9
