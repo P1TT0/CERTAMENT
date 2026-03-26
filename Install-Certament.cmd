@@ -1,4 +1,5 @@
 @echo off
+title CERTAMENT - Certificate Manager
 :: ============================================================
 ::  CERTAMENT - Launcher Installer
 ::  Tasto destro -> "Esegui come amministratore"

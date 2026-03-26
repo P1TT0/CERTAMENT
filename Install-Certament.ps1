@@ -21,20 +21,316 @@ $ErrorActionPreference = 'Stop'
 # ============================================================
 # Helpers
 # ============================================================
+
+# The big block logo lines (used by both static and animated)
+function Get-LogoLines {
+    # ANSI Shadow block font for "CERTAMENT" built with [char] codes for PS 5.1 safety
+    $F  = [char]0x2588  # Full block
+    $TL = [char]0x2554  # Top-left double
+    $TR = [char]0x2557  # Top-right double
+    $BL = [char]0x255A  # Bottom-left double
+    $BR = [char]0x255D  # Bottom-right double
+    $H  = [char]0x2550  # Horizontal double
+    $V  = [char]0x2551  # Vertical double
+    $s  = ' '
+
+    # Each letter as 6-line array, standard ANSI Shadow proportions
+    $C = @(
+        "$s$F$F$F$F$F$F$TL",
+        "$F$F$TL$H$H$H$H$BR",
+        "$F$F$V$s$s$s$s$s",
+        "$F$F$V$s$s$s$s$s",
+        "$BL$F$F$F$F$F$F$TL",
+        "$s$BL$H$H$H$H$H$BR"
+    )
+    $E = @(
+        "$F$F$F$F$F$F$F$TL",
+        "$F$F$TL$H$H$H$H$BR",
+        "$F$F$F$F$F$TL$s$s",
+        "$F$F$TL$H$H$BR$s$s",
+        "$F$F$F$F$F$F$F$TL",
+        "$BL$H$H$H$H$H$H$BR"
+    )
+    $R = @(
+        "$F$F$F$F$F$F$TL$s",
+        "$F$F$TL$H$H$F$F$TL",
+        "$F$F$F$F$F$F$TL$BR",
+        "$F$F$TL$H$F$F$TL$s",
+        "$F$F$V$s$s$F$F$V",
+        "$BL$H$BR$s$s$BL$H$BR"
+    )
+    $T = @(
+        "$F$F$F$F$F$F$F$F$TL",
+        "$BL$H$H$F$F$TL$H$H$BR",
+        "$s$s$s$F$F$V$s$s$s",
+        "$s$s$s$F$F$V$s$s$s",
+        "$s$s$s$F$F$V$s$s$s",
+        "$s$s$s$BL$H$BR$s$s$s"
+    )
+    $A = @(
+        "$s$F$F$F$F$F$TL$s",
+        "$F$F$TL$H$H$F$F$TL",
+        "$F$F$F$F$F$F$F$V",
+        "$F$F$TL$H$H$F$F$V",
+        "$F$F$V$s$s$F$F$V",
+        "$BL$H$BR$s$s$BL$H$BR"
+    )
+    $M = @(
+        "$F$F$TL$s$s$s$F$F$TL",
+        "$F$F$F$F$TL$F$F$F$F$V",
+        "$F$F$TL$F$F$TL$F$F$V",
+        "$F$F$V$BL$F$TL$F$F$V",
+        "$F$F$V$s$BL$BR$F$F$V",
+        "$BL$H$BR$s$s$s$BL$H$BR"
+    )
+    $N = @(
+        "$F$F$TL$s$s$F$F$TL",
+        "$F$F$F$TL$s$F$F$V",
+        "$F$F$TL$F$TL$F$F$V",
+        "$F$F$V$BL$F$F$F$V",
+        "$F$F$V$s$BL$F$F$V",
+        "$BL$H$BR$s$s$BL$H$BR"
+    )
+    # "Certament" = C E R T A M E N T
+    $gap = '  '
+    $lines = @()
+    for ($row = 0; $row -lt 6; $row++) {
+        $lines += $C[$row] + $gap + $E[$row] + $gap + $R[$row] + $gap + $T[$row] + $gap + $A[$row] + $gap + $M[$row] + $gap + $E[$row] + $gap + $N[$row] + $gap + $T[$row]
+    }
+    return $lines
+}
+
+function Get-LogoLineColors {
+    return @('Cyan','Cyan','White','White','Cyan','DarkCyan')
+}
+
+function Write-BannerLines {
+    param([switch]$NoNewlineBefore)
+    $logoLines  = Get-LogoLines
+    $logoColors = Get-LogoLineColors
+    $maxLen = 0; foreach ($ll in $logoLines) { if ($ll.Length -gt $maxLen) { $maxLen = $ll.Length } }
+    $hLine  = [string]::new([char]0x2550, [Math]::Min($maxLen, 90))
+    if (-not $NoNewlineBefore) { Write-Host "" }
+    for ($i = 0; $i -lt $logoLines.Count; $i++) {
+        Write-Host "  $($logoLines[$i])" -ForegroundColor $logoColors[$i]
+    }
+    Write-Host ""
+    Write-Host "  $hLine" -ForegroundColor DarkGray
+    Write-Host "   Automated Certificate Manager for BC + IIS                              v1.0" -ForegroundColor Gray
+    Write-Host "   $env:COMPUTERNAME  $([char]0x00B7)  $(Get-Date -Format 'yyyy-MM-dd HH:mm')" -ForegroundColor DarkGray
+    Write-Host "  $hLine" -ForegroundColor DarkGray
+    Write-Host ''
+}
+
+function Write-AnimatedBanner {
+    Clear-Host
+    try { $Host.UI.RawUI.WindowTitle = "CERTAMENT - Certificate Manager" } catch {}
+
+    $logoLines  = Get-LogoLines
+    $logoColors = Get-LogoLineColors
+    $maxLen = 0; foreach ($ll in $logoLines) { if ($ll.Length -gt $maxLen) { $maxLen = $ll.Length } }
+    $width  = $maxLen + 4
+    $hLen   = [Math]::Min($maxLen, 90)
+    $hLine  = [string]::new([char]0x2550, $hLen)
+
+    # --- Phase 0: Blank space to position logo ---
+    $topPad = 2
+    for ($p = 0; $p -lt $topPad; $p++) { Write-Host "" }
+
+    # --- Phase 1: Matrix rain teaser ---
+    $matrixChars = '01{}[]<>/\|$#@%&*=+~^CERTAMENT'.ToCharArray()
+    $rainRows = $logoLines.Count
+    $rainColors = @('DarkGreen','Green','DarkCyan','DarkGreen','Green')
+    $startPos = $Host.UI.RawUI.CursorPosition
+
+    # Reserve space
+    for ($r = 0; $r -lt $rainRows; $r++) { Write-Host (' ' * $width) }
+
+    # Rain animation frames
+    for ($frame = 0; $frame -lt 8; $frame++) {
+        for ($r = 0; $r -lt $rainRows; $r++) {
+            $pos = $startPos
+            $pos.Y = $startPos.Y + $r
+            $pos.X = 0
+            $Host.UI.RawUI.CursorPosition = $pos
+
+            $line = ""
+            for ($c = 0; $c -lt $width; $c++) {
+                if ((Get-Random -Minimum 0 -Maximum 100) -lt (15 + $frame * 10)) {
+                    $line += $matrixChars[(Get-Random -Minimum 0 -Maximum $matrixChars.Count)]
+                } else {
+                    $line += ' '
+                }
+            }
+            $color = $rainColors[(Get-Random -Minimum 0 -Maximum $rainColors.Count)]
+            Write-Host $line -ForegroundColor $color -NoNewline
+        }
+        Start-Sleep -Milliseconds 60
+    }
+
+    # --- Phase 2: Flash white then clear ---
+    for ($r = 0; $r -lt $rainRows; $r++) {
+        $pos = $startPos
+        $pos.Y = $startPos.Y + $r
+        $pos.X = 0
+        $Host.UI.RawUI.CursorPosition = $pos
+        Write-Host ([string]::new([char]0x2588, $width)) -ForegroundColor White -NoNewline
+    }
+    Start-Sleep -Milliseconds 100
+
+    for ($r = 0; $r -lt $rainRows; $r++) {
+        $pos = $startPos
+        $pos.Y = $startPos.Y + $r
+        $pos.X = 0
+        $Host.UI.RawUI.CursorPosition = $pos
+        Write-Host (' ' * $width) -NoNewline
+    }
+    Start-Sleep -Milliseconds 80
+
+    # --- Phase 3: Center-out wipe reveal ---
+    $center = [int]($maxLen / 2)
+    $revealSteps = $center + 2
+
+    for ($step = 0; $step -lt $revealSteps; $step += 3) {
+        $left  = [Math]::Max(0, $center - $step)
+        $right = [Math]::Min($maxLen, $center + $step)
+
+        for ($r = 0; $r -lt $logoLines.Count; $r++) {
+            $pos = $startPos
+            $pos.Y = $startPos.Y + $r
+            $pos.X = 0
+            $Host.UI.RawUI.CursorPosition = $pos
+
+            $ln = $logoLines[$r]
+            if ($ln.Length -lt $maxLen) { $ln = $ln.PadRight($maxLen) }
+
+            $visible = (' ' * $left) + $ln.Substring($left, [Math]::Min($right - $left, $ln.Length - $left))
+            $visible = $visible.PadRight($maxLen)
+            Write-Host "  $visible" -ForegroundColor $logoColors[$r] -NoNewline
+        }
+        Start-Sleep -Milliseconds 16
+    }
+
+    # Final full logo
+    for ($r = 0; $r -lt $logoLines.Count; $r++) {
+        $pos = $startPos
+        $pos.Y = $startPos.Y + $r
+        $pos.X = 0
+        $Host.UI.RawUI.CursorPosition = $pos
+        $ln = $logoLines[$r].PadRight($width)
+        Write-Host "  $ln" -ForegroundColor $logoColors[$r] -NoNewline
+    }
+
+    # --- Phase 4: Color pulse ---
+    $pulseColors = @('DarkCyan','Cyan','White','Cyan','DarkCyan')
+    foreach ($pc in $pulseColors) {
+        for ($r = 0; $r -lt $logoLines.Count; $r++) {
+            $pos = $startPos
+            $pos.Y = $startPos.Y + $r
+            $pos.X = 0
+            $Host.UI.RawUI.CursorPosition = $pos
+            $ln = $logoLines[$r].PadRight($width)
+            Write-Host "  $ln" -ForegroundColor $pc -NoNewline
+        }
+        Start-Sleep -Milliseconds 70
+    }
+
+    # Final stable with correct per-line colors
+    for ($r = 0; $r -lt $logoLines.Count; $r++) {
+        $pos = $startPos
+        $pos.Y = $startPos.Y + $r
+        $pos.X = 0
+        $Host.UI.RawUI.CursorPosition = $pos
+        $ln = $logoLines[$r].PadRight($width)
+        Write-Host "  $ln" -ForegroundColor $logoColors[$r] -NoNewline
+    }
+    Start-Sleep -Milliseconds 100
+
+    # Move cursor below logo
+    $endPos = $startPos
+    $endPos.Y = $startPos.Y + $logoLines.Count
+    $endPos.X = 0
+    $Host.UI.RawUI.CursorPosition = $endPos
+    Write-Host ""
+
+    # --- Phase 5: Separator line sweep ---
+    $partialLine = ""
+    $stepSize = 6
+    for ($c = 0; $c -lt $hLen; $c += $stepSize) {
+        $len = [Math]::Min($stepSize, $hLen - $c)
+        $partialLine += [string]::new([char]0x2550, $len)
+        $linePos = $Host.UI.RawUI.CursorPosition
+        $linePos.X = 0
+        $Host.UI.RawUI.CursorPosition = $linePos
+        Write-Host "  $partialLine" -NoNewline -ForegroundColor DarkGray
+        Start-Sleep -Milliseconds 8
+    }
+    Write-Host ""
+
+    # --- Phase 6: Typewriter info ---
+    $infoText   = "   Automated Certificate Manager for BC + IIS                              v1.0"
+    $serverText = "   $env:COMPUTERNAME  $([char]0x00B7)  $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
+
+    foreach ($ch in $infoText.ToCharArray()) {
+        Write-Host $ch -NoNewline -ForegroundColor Gray
+        Start-Sleep -Milliseconds 4
+    }
+    Write-Host ""
+    foreach ($ch in $serverText.ToCharArray()) {
+        Write-Host $ch -NoNewline -ForegroundColor DarkGray
+        Start-Sleep -Milliseconds 4
+    }
+    Write-Host ""
+    Write-Host "  $hLine" -ForegroundColor DarkGray
+    Write-Host ''
+}
+
 function Write-Banner {
     Clear-Host
-    Write-Host ""
-    Write-Host "  +======================================================+" -ForegroundColor Cyan
-    Write-Host "  |           CERTAMENT  -  Installer v1.0              |" -ForegroundColor Cyan
-    Write-Host "  |    Automated certificate manager for BC + IIS       |" -ForegroundColor Cyan
-    Write-Host "  +======================================================+" -ForegroundColor Cyan
-    Write-Host ""
+    try { $Host.UI.RawUI.WindowTitle = "CERTAMENT - Certificate Manager" } catch {}
+    Write-BannerLines
 }
 
 function Write-Step {
     param([int]$n, [int]$total, [string]$label)
     Write-Host ""
-    Write-Host "  --- Step $n/$total : $label ---" -ForegroundColor Yellow
+    $filled = [string]::new([char]0x2588, $n)
+    $empty  = [string]::new([char]0x2591, $total - $n)
+    Write-Host "  [$filled$empty] " -NoNewline -ForegroundColor DarkCyan
+    Write-Host "Step $n/$total" -ForegroundColor DarkGray
+    Write-Host "  $([char]0x25BA) $label" -ForegroundColor Yellow
+    Write-Host ""
+}
+
+# Draws the wizard header: banner + mini-recap of collected values + current step
+function Write-WizardScreen {
+    param([int]$StepNum, [int]$StepTotal, [string]$StepLabel, [hashtable]$Collected)
+    Clear-Host
+    try { $Host.UI.RawUI.WindowTitle = "CERTAMENT - Certificate Manager" } catch {}
+    Write-BannerLines -NoNewlineBefore
+
+    # Show compact recap of previously collected values
+    if ($Collected -and $Collected.Count -gt 0) {
+        $tV = [char]0x2502
+        Write-Host "  Configurazione raccolta:" -ForegroundColor DarkGray
+        foreach ($key in $Collected.Keys) {
+            $val = $Collected[$key]
+            $displayVal = if ([string]::IsNullOrWhiteSpace($val)) { "-" } else { $val }
+            if ($displayVal.Length -gt 40) { $displayVal = $displayVal.Substring(0,37) + "..." }
+            Write-Host "  $tV " -NoNewline -ForegroundColor DarkCyan
+            Write-Host "$key" -NoNewline -ForegroundColor DarkGray
+            Write-Host " : " -NoNewline -ForegroundColor DarkGray
+            Write-Host "$displayVal" -ForegroundColor White
+        }
+        Write-Host ""
+    }
+
+    # Current step header
+    $filled = [string]::new([char]0x2588, $StepNum)
+    $empty  = [string]::new([char]0x2591, $StepTotal - $StepNum)
+    Write-Host "  [$filled$empty] " -NoNewline -ForegroundColor DarkCyan
+    Write-Host "Step $StepNum/$StepTotal" -ForegroundColor DarkGray
+    Write-Host "  $([char]0x25BA) $StepLabel" -ForegroundColor Yellow
     Write-Host ""
 }
 
@@ -552,9 +848,10 @@ function Invoke-Diagnostics {
     # ---- Summary ----
     Write-Host ""
     $sumColor = if ($script:dFail -gt 0) { "Red" } elseif ($script:dWarn -gt 0) { "Yellow" } else { "Green" }
-    Write-Host "  +-----------------------------------------------------+" -ForegroundColor $sumColor
-    Write-Host ("  |  PASS: {0,-5}  WARN: {1,-5}  FAIL: {2,-5}              |" -f $script:dPass, $script:dWarn, $script:dFail) -ForegroundColor $sumColor
-    Write-Host "  +-----------------------------------------------------+" -ForegroundColor $sumColor
+    $bH = [string]::new([char]0x2550, 53)
+    Write-Host "  $([char]0x2554)$bH$([char]0x2557)" -ForegroundColor $sumColor
+    Write-Host ("  $([char]0x2551)  PASS: {0,-5}  $([char]0x00B7)  WARN: {1,-5}  $([char]0x00B7)  FAIL: {2,-5}        $([char]0x2551)" -f $script:dPass, $script:dWarn, $script:dFail) -ForegroundColor $sumColor
+    Write-Host "  $([char]0x255A)$bH$([char]0x255D)" -ForegroundColor $sumColor
     Write-Host ""
 }
 
@@ -562,42 +859,47 @@ function Invoke-Diagnostics {
 # INSTALL WIZARD
 # ============================================================
 function Invoke-Install {
-    Write-Banner
-    Write-Host "  Benvenuto nel wizard di installazione di CERTAMENT." -ForegroundColor White
-    Write-Host "  Rispondere alle domande seguenti per configurare lo strumento." -ForegroundColor Gray
-    Write-Host "  I valori tra parentesi quadre sono i default: premi Invio per accettarli." -ForegroundColor Gray
+    $collected = [ordered]@{}
 
     # ---------- Step 1: Install path ----------
-    Write-Step 1 6 "Percorso di installazione"
+    Write-WizardScreen -StepNum 1 -StepTotal 6 -StepLabel "Percorso di installazione" -Collected $collected
     Write-Info "Dove installare CERTAMENT su questo server?"
     $installPath = Read-Value -Prompt "Percorso" -Default "C:\CERTAMENT"
+    $collected["Percorso"] = $installPath
     Write-Info "Nome cliente (tag usato in notifiche e heartbeat)."
     $customerName = Read-Value -Prompt "Nome cliente" -Default $env:COMPUTERNAME
+    $collected["Cliente"] = $customerName
 
     # ---------- Step 2: PFX drop folder ----------
-    Write-Step 2 6 "Cartella PFX"
+    Write-WizardScreen -StepNum 2 -StepTotal 6 -StepLabel "Cartella PFX" -Collected $collected
     Write-Info "Percorso della cartella dove verra depositato il file .pfx rinnovato."
     Write-Info "CERTAMENT cerchera il .pfx piu recente in questa cartella."
     $pfxPath = Read-Value -Prompt "Cartella PFX" -Default "C:\_install"
+    $collected["Cartella PFX"] = $pfxPath
 
     Write-Info "Password PFX: il cliente puo creare un file 'password.txt' nella cartella PFX."
     Write-Info "CERTAMENT lo leggera e lo eliminera dopo l'uso."
     Write-Info "In alternativa, inserire una password di fallback qui (oppure lasciare vuoto)."
     $pfxPassword = Read-Value -Prompt "Password PFX fallback (opzionale)" -Default "" -AllowEmpty
+    $collected["Pwd PFX"] = if ($pfxPassword) { "Fallback config" } else { "Solo password.txt" }
 
     # ---------- Step 3: IIS ----------
-    Write-Step 3 6 "Configurazione IIS"
+    Write-WizardScreen -StepNum 3 -StepTotal 6 -StepLabel "Configurazione IIS" -Collected $collected
     Write-Info "Nome del sito IIS Business Central (esatto, case-sensitive)."
     $iisSiteName = Read-Value -Prompt "Nome sito IIS" -Default "Microsoft Dynamics 365 Business Central Web Client"
+    $collected["Sito IIS"] = $iisSiteName
     $iisRestart = Read-YesNo -Prompt "Riavviare IIS dopo aggiornamento del binding?" -Default $true
+    $collected["Restart IIS"] = if ($iisRestart) { "Si" } else { "No" }
 
     # ---------- Step 4: Notifications ----------
-    Write-Step 4 6 "Notifiche Teams (Power Automate webhook)"
+    Write-WizardScreen -StepNum 4 -StepTotal 6 -StepLabel "Notifiche Teams (Power Automate webhook)" -Collected $collected
     Write-Info "Le notifiche vengono inviate tramite webhook a Microsoft Teams."
     Write-Info "Lasciare vuoto per disabilitare le notifiche."
 
     $webhookCustomer = Read-Value -Prompt "Webhook Customer (Teams)" -AllowEmpty
+    $collected["WH Customer"] = if ($webhookCustomer) { "Configurato" } else { "Disabilitato" }
     $webhookInternal = Read-Value -Prompt "Webhook Internal (Teams)" -AllowEmpty
+    $collected["WH Internal"] = if ($webhookInternal) { "Configurato" } else { "Disabilitato" }
 
     Write-Info "Heartbeat Azure per monitoraggio del tool (consigliato)."
     $heartbeatEnabled = Read-YesNo -Prompt "Abilitare heartbeat Azure?" -Default $true
@@ -618,6 +920,7 @@ function Invoke-Install {
             $heartbeatTimeoutSec = [int]$timeoutRaw
         }
     }
+    $collected["Heartbeat"] = if ($heartbeatEnabled) { "Si ($heartbeatTimeoutSec sec)" } else { "No" }
 
     Write-Info "Quanti giorni prima della scadenza avviare il processo di rinnovo?"
     $notifyDays = Read-Value -Prompt "Giorni soglia scadenza" -Default "30"
@@ -625,32 +928,36 @@ function Invoke-Install {
         Write-Warn "Inserire un numero intero."
         $notifyDays = Read-Value -Prompt "Giorni soglia scadenza" -Default "30"
     }
+    $collected["Soglia gg"] = "$notifyDays giorni"
 
     # ---------- Step 5: Scheduled Task ----------
-    Write-Step 5 6 "Scheduled Task"
+    Write-WizardScreen -StepNum 5 -StepTotal 6 -StepLabel "Scheduled Task" -Collected $collected
     $createTask = Read-YesNo -Prompt "Registrare uno Scheduled Task per l'esecuzione automatica?" -Default $true
     $taskTime = "06:00"
     if ($createTask) {
         Write-Info "A che ora eseguire CERTAMENT ogni giorno?"
         $taskTime = Read-TimeValue -Prompt "Orario esecuzione (HH:mm)" -Default "06:00"
     }
+    $collected["Task"] = if ($createTask) { "Si, alle $taskTime" } else { "No" }
 
     # ---------- Step 6: Confirm ----------
-    Write-Step 6 6 "Riepilogo"
+    Write-WizardScreen -StepNum 6 -StepTotal 6 -StepLabel "Riepilogo" -Collected $collected
 
-    Write-Host "  +-----------------------------------------------------+" -ForegroundColor White
-    Write-Host ("  |  Percorso installazione : {0}" -f $installPath.PadRight(27)) -ForegroundColor White
-    Write-Host ("  |  Nome cliente           : {0}" -f ($customerName.Substring(0, [Math]::Min(27, $customerName.Length))).PadRight(27)) -ForegroundColor White
-    Write-Host ("  |  Cartella PFX           : {0}" -f $pfxPath.PadRight(27)) -ForegroundColor White
-    Write-Host ("  |  Password PFX           : {0}" -f ($(if ($pfxPassword) {"Fallback nel config"} else {"Solo password.txt"}).PadRight(27))) -ForegroundColor White
-    Write-Host ("  |  Sito IIS               : {0}" -f ($iisSiteName.Substring(0, [Math]::Min(27, $iisSiteName.Length))).PadRight(27)) -ForegroundColor White
-    Write-Host ("  |  Riavvio IIS            : {0}" -f ($(if ($iisRestart) {"Si"} else {"No"}).PadRight(27))) -ForegroundColor White
-    Write-Host ("  |  Webhook Customer       : {0}" -f ($(if ($webhookCustomer) {"Configurato"} else {"Disabilitato"}).PadRight(27))) -ForegroundColor White
-    Write-Host ("  |  Webhook Internal       : {0}" -f ($(if ($webhookInternal) {"Configurato"} else {"Disabilitato"}).PadRight(27))) -ForegroundColor White
-    Write-Host ("  |  Heartbeat Azure        : {0}" -f ($(if ($heartbeatEnabled) {"Si ($heartbeatTimeoutSec sec)"} else {"No"}).PadRight(27))) -ForegroundColor White
-    Write-Host ("  |  Soglia scadenza        : {0} giorni" -f $notifyDays.PadRight(21)) -ForegroundColor White
-    Write-Host ("  |  Scheduled Task         : {0}" -f ($(if ($createTask) {"Si, alle $taskTime"} else {"No"}).PadRight(27))) -ForegroundColor White
-    Write-Host "  +-----------------------------------------------------+" -ForegroundColor White
+    $tH = [string]::new([char]0x2500, 53)
+    $tV = [char]0x2502
+    Write-Host "  $([char]0x250C)$tH$([char]0x2510)" -ForegroundColor DarkCyan
+    Write-Host ("  $tV  Percorso installazione : {0}" -f $installPath.PadRight(27)) -ForegroundColor White
+    Write-Host ("  $tV  Nome cliente           : {0}" -f ($customerName.Substring(0, [Math]::Min(27, $customerName.Length))).PadRight(27)) -ForegroundColor White
+    Write-Host ("  $tV  Cartella PFX           : {0}" -f $pfxPath.PadRight(27)) -ForegroundColor White
+    Write-Host ("  $tV  Password PFX           : {0}" -f ($(if ($pfxPassword) {"Fallback nel config"} else {"Solo password.txt"}).PadRight(27))) -ForegroundColor White
+    Write-Host ("  $tV  Sito IIS               : {0}" -f ($iisSiteName.Substring(0, [Math]::Min(27, $iisSiteName.Length))).PadRight(27)) -ForegroundColor White
+    Write-Host ("  $tV  Riavvio IIS            : {0}" -f ($(if ($iisRestart) {"Si"} else {"No"}).PadRight(27))) -ForegroundColor White
+    Write-Host ("  $tV  Webhook Customer       : {0}" -f ($(if ($webhookCustomer) {"Configurato"} else {"Disabilitato"}).PadRight(27))) -ForegroundColor White
+    Write-Host ("  $tV  Webhook Internal       : {0}" -f ($(if ($webhookInternal) {"Configurato"} else {"Disabilitato"}).PadRight(27))) -ForegroundColor White
+    Write-Host ("  $tV  Heartbeat Azure        : {0}" -f ($(if ($heartbeatEnabled) {"Si ($heartbeatTimeoutSec sec)"} else {"No"}).PadRight(27))) -ForegroundColor White
+    Write-Host ("  $tV  Soglia scadenza        : {0} giorni" -f $notifyDays.PadRight(21)) -ForegroundColor White
+    Write-Host ("  $tV  Scheduled Task         : {0}" -f ($(if ($createTask) {"Si, alle $taskTime"} else {"No"}).PadRight(27))) -ForegroundColor White
+    Write-Host "  $([char]0x2514)$tH$([char]0x2518)" -ForegroundColor DarkCyan
     Write-Host ""
 
     $confirm = Read-YesNo -Prompt "Procedere con l'installazione?" -Default $true
@@ -860,9 +1167,12 @@ function Invoke-Install {
     # DONE
     # ============================================================
     Write-Host ""
-    Write-Host "  +======================================================+" -ForegroundColor Green
-    Write-Host "  |          Installazione completata!                  |" -ForegroundColor Green
-    Write-Host "  +======================================================+" -ForegroundColor Green
+    $cH = [string]::new([char]0x2550, 56)
+    Write-Host "  $([char]0x2554)$cH$([char]0x2557)" -ForegroundColor Green
+    Write-Host "  $([char]0x2551)$(' ' * 56)$([char]0x2551)" -ForegroundColor Green
+    Write-Host "  $([char]0x2551)       INSTALLAZIONE COMPLETATA CON SUCCESSO        $([char]0x2551)" -ForegroundColor Green
+    Write-Host "  $([char]0x2551)$(' ' * 56)$([char]0x2551)" -ForegroundColor Green
+    Write-Host "  $([char]0x255A)$cH$([char]0x255D)" -ForegroundColor Green
     Write-Host ""
     Write-Info "Percorso: $installPath"
     Write-Info "Per la diagnostica post-installazione:"
@@ -883,12 +1193,15 @@ function Invoke-Install {
 # ============================================================
 # MAIN MENU
 # ============================================================
-Write-Banner
+Write-AnimatedBanner
 Write-Host "  Selezionare un'operazione:" -ForegroundColor White
 Write-Host ""
-Write-Host "     [1]  Installa CERTAMENT" -ForegroundColor White
-Write-Host "     [2]  Verifica installazione (diagnostica)" -ForegroundColor White
-Write-Host "     [0]  Esci" -ForegroundColor Gray
+Write-Host "      [1]  Installa CERTAMENT" -ForegroundColor Cyan
+Write-Host "      [2]  Verifica installazione (diagnostica)" -ForegroundColor White
+Write-Host "      [0]  Esci" -ForegroundColor DarkGray
+Write-Host ""
+$hRule = [string]::new([char]0x2500, 63)
+Write-Host "  $hRule" -ForegroundColor DarkGray
 Write-Host ""
 $menuChoice = Read-Host "      Scelta"
 Write-Host ""
