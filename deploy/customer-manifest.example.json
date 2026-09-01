@@ -1,0 +1,38 @@
+[
+  {
+    "customerId": "eos-lab-01",
+    "customerName": "EOS Internal Lab",
+    "tenantId": "00000000-0000-0000-0000-000000000000",
+    "subscriptionId": "00000000-0000-0000-0000-000000000000",
+    "environmentType": "lab",
+    "serverName": "BC-LAB-01",
+    "executionMode": "scheduled-task",
+    "installPath": "C:\\CERTAMENT",
+    "artifactExtractPath": "C:\\CERTAMENT\\_release",
+    "deployMethod": "winrm-copy",
+    "ring": 0,
+    "enabled": true,
+    "installedVersion": "1.0.0",
+    "targetVersion": "1.0.0",
+    "owner": "EOS Ops",
+    "notes": "Target interno per Ring 0"
+  },
+  {
+    "customerId": "pilot-customer-01",
+    "customerName": "Pilot Customer",
+    "tenantId": "11111111-1111-1111-1111-111111111111",
+    "subscriptionId": "11111111-1111-1111-1111-111111111111",
+    "environmentType": "production",
+    "serverName": "BC-PROD-01",
+    "executionMode": "scheduled-task",
+    "installPath": "C:\\CERTAMENT",
+    "artifactExtractPath": "C:\\CERTAMENT\\_release",
+    "deployMethod": "winrm-copy",
+    "ring": 1,
+    "enabled": false,
+    "installedVersion": "1.0.0",
+    "targetVersion": "1.0.0",
+    "owner": "EOS Delivery",
+    "notes": "Abilitare solo dopo validazione Ring 0"
+  }
+]

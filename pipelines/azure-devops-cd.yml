@@ -1,0 +1,141 @@
+trigger: none
+pr: none
+
+resources:
+  pipelines:
+    - pipeline: certament_ci
+      source: CERTAMENT-CI
+      trigger: none
+
+parameters:
+  - name: targetRing
+    displayName: Target ring
+    type: string
+    default: '0'
+    values:
+      - '0'
+      - '1'
+      - '2'
+      - '3'
+
+  - name: packageVersion
+    displayName: Package version
+    type: string
+    default: latest
+
+variables:
+  ArtifactName: certament-package
+  ManifestPath: deploy/customer-manifest.example.json
+
+stages:
+  - stage: PrepareTargets
+    displayName: Prepare targets
+    jobs:
+      - job: ResolveTargets
+        displayName: Resolve deployment targets
+        pool:
+          vmImage: windows-latest
+        steps:
+          - checkout: self
+            clean: true
+
+          - task: PowerShell@2
+            displayName: Resolve targets from manifest
+            inputs:
+              targetType: inline
+              pwsh: false
+              script: |
+                $manifestPath = Join-Path '$(Build.SourcesDirectory)' '$(ManifestPath)'
+                if (-not (Test-Path $manifestPath)) {
+                  throw ('Manifest not found: ' + $manifestPath)
+                }
+
+                $allTargets = Get-Content -Raw $manifestPath | ConvertFrom-Json
+                $targets = @($allTargets | Where-Object {
+                  $_.enabled -eq $true -and [string]$_.ring -eq '${{ parameters.targetRing }}'
+                })
+
+                if ($targets.Count -eq 0) {
+                  Write-Host '##vso[task.setvariable variable=HasTargets;isOutput=true]false'
+                  Write-Host 'No enabled targets found for selected ring.'
+                  return
+                }
+
+                $targetNames = ($targets | ForEach-Object { $_.serverName }) -join ', '
+                Write-Host ('Targets: ' + $targetNames)
+                Write-Host '##vso[task.setvariable variable=HasTargets;isOutput=true]true'
+
+  - stage: Deploy
+    displayName: Deploy ring
+    dependsOn: PrepareTargets
+    condition: succeeded()
+    jobs:
+      - deployment: DeployRing
+        displayName: Deploy selected ring
+        environment: certament-ring-${{ parameters.targetRing }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - download: certament_ci
+                  artifact: $(ArtifactName)
+                  displayName: Download CI artifact
+
+                - task: PowerShell@2
+                  displayName: Preview deploy plan
+                  inputs:
+                    targetType: inline
+                    pwsh: false
+                    script: |
+                      $manifestPath = Join-Path '$(Build.SourcesDirectory)' '$(ManifestPath)'
+                      $targets = Get-Content -Raw $manifestPath | ConvertFrom-Json | Where-Object {
+                        $_.enabled -eq $true -and [string]$_.ring -eq '${{ parameters.targetRing }}'
+                      }
+
+                      foreach ($target in $targets) {
+                        Write-Host ('Planned deploy -> {0} ({1}) version {2}' -f $target.customerName, $target.serverName, '${{ parameters.packageVersion }}')
+                      }
+
+                      Write-Host 'This pipeline is a skeleton.'
+                      Write-Host 'Expected upstream pipeline resource name: CERTAMENT-CI'
+                      Write-Host 'Replace the deploy step with your chosen transport: WinRM, SMB pull, Azure Arc, Automation Hybrid Worker, or agent-based deployment.'
+
+                - task: ManualValidation@0
+                  displayName: Approval after ring plan review
+                  timeoutInMinutes: 1440
+                  inputs:
+                    notifyUsers: ''
+                    instructions: |
+                      Validate the target list for the selected ring.
+                      Confirm artifact version, deployment window, and rollback readiness before resuming.
+                    onTimeout: reject
+
+                - task: PowerShell@2
+                  displayName: Placeholder deployment execution
+                  inputs:
+                    targetType: inline
+                    pwsh: false
+                    script: |
+                      Write-Host 'TODO: implement deployment transport.'
+                      Write-Host 'Suggested steps:'
+                      Write-Host '1. Copy artifact ZIP to target server.'
+                      Write-Host '2. Extract to staging folder.'
+                      Write-Host '3. Backup current install.'
+                      Write-Host '4. Replace runtime files.'
+                      Write-Host '5. Run smoke test.'
+                      Write-Host '6. Mark target with deployed version.'
+
+                - task: PowerShell@2
+                  displayName: Placeholder smoke test
+                  inputs:
+                    targetType: inline
+                    pwsh: false
+                    script: |
+                      Write-Host 'TODO: implement smoke tests against Ring ${{ parameters.targetRing }} targets.'
+                      Write-Host 'Minimum smoke checks:'
+                      Write-Host '- config.json present'
+                      Write-Host '- modules folder present'
+                      Write-Host '- Scheduled Task exists or execution mode documented'
+                      Write-Host '- manual diagnostics entrypoint reachable'

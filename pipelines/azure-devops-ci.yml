@@ -1,0 +1,163 @@
+trigger:
+  branches:
+    include:
+      - main
+      - release
+      - develop
+
+pr:
+  branches:
+    include:
+      - main
+      - release
+      - develop
+
+pool:
+  vmImage: windows-latest
+
+variables:
+  ArtifactName: certament-package
+  BuildConfiguration: release
+
+stages:
+  - stage: ValidateAndPackage
+    displayName: Validate and Package
+    jobs:
+      - job: Validate
+        displayName: PowerShell validation
+        steps:
+          - checkout: self
+            clean: true
+
+          - task: PowerShell@2
+            displayName: Syntax check with Windows PowerShell 5.1
+            inputs:
+              targetType: inline
+              pwsh: false
+              script: |
+                $scriptFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Include *.ps1,*.psm1 |
+                  Where-Object { $_.FullName -notmatch '\\.git\\|\\logs\\|\\tools\\e2e\\archive\\' }
+
+                if (-not $scriptFiles) {
+                  throw 'No PowerShell files found to validate.'
+                }
+
+                $parseErrors = @()
+                foreach ($file in $scriptFiles) {
+                  $tokens = $null
+                  $errors = $null
+                  [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
+                  if ($errors) {
+                    $parseErrors += $errors | ForEach-Object {
+                      '{0}:{1}:{2} {3}' -f $file.FullName, $_.Extent.StartLineNumber, $_.Extent.StartColumnNumber, $_.Message
+                    }
+                  }
+                }
+
+                if ($parseErrors.Count -gt 0) {
+                  $parseErrors | ForEach-Object { Write-Error $_ }
+                  throw 'Syntax validation failed.'
+                }
+
+          - task: PowerShell@2
+            displayName: Install PSScriptAnalyzer and Pester
+            inputs:
+              targetType: inline
+              pwsh: false
+              script: |
+                Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+                Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -Repository PSGallery
+                Install-Module Pester -Scope CurrentUser -Force -SkipPublisherCheck -Repository PSGallery
+
+          - task: PowerShell@2
+            displayName: Run PSScriptAnalyzer
+            inputs:
+              targetType: inline
+              pwsh: false
+              script: |
+                $settings = @{
+                  Path = '$(Build.SourcesDirectory)'
+                  Recurse = $true
+                  Severity = @('Error', 'Warning')
+                  ExcludePath = @(
+                    '*\\logs\\*',
+                    '*\\tools\\e2e\\archive\\*'
+                  )
+                }
+
+                $results = Invoke-ScriptAnalyzer @settings
+                if ($results) {
+                  $results | ForEach-Object {
+                    Write-Error ('{0}:{1}:{2} [{3}] {4}' -f $_.ScriptName, $_.Line, $_.Column, $_.Severity, $_.Message)
+                  }
+                  throw 'PSScriptAnalyzer reported findings.'
+                }
+
+          - task: PowerShell@2
+            displayName: Run Pester tests if present
+            inputs:
+              targetType: inline
+              pwsh: false
+              script: |
+                $testsPath = Join-Path '$(Build.SourcesDirectory)' 'tests'
+                if (-not (Test-Path $testsPath)) {
+                  Write-Host 'No tests folder found. Skipping Pester.'
+                  return
+                }
+
+                $configuration = New-PesterConfiguration
+                $configuration.Run.Path = $testsPath
+                $configuration.Run.Exit = $true
+                $configuration.Output.Verbosity = 'Detailed'
+                Invoke-Pester -Configuration $configuration
+
+          - task: PowerShell@2
+            displayName: Package CERTAMENT artifact
+            inputs:
+              targetType: inline
+              pwsh: false
+              script: |
+                $version = if ($env:BUILD_BUILDNUMBER) { $env:BUILD_BUILDNUMBER } else { '0.0.0-local' }
+                $stagingRoot = Join-Path '$(Build.ArtifactStagingDirectory)' 'certament'
+                $packageRoot = Join-Path $stagingRoot $version
+
+                New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
+
+                $include = @(
+                  '_MAINCertManager.ps1',
+                  'Install-Certament.ps1',
+                  'Install-Certament.cmd',
+                  'Uninstall-Certament.ps1',
+                  'config.example.json',
+                  'modules',
+                  'tools',
+                  'docs'
+                )
+
+                foreach ($item in $include) {
+                  $sourcePath = Join-Path '$(Build.SourcesDirectory)' $item
+                  if (Test-Path $sourcePath) {
+                    Copy-Item -Path $sourcePath -Destination $packageRoot -Recurse -Force
+                  }
+                }
+
+                $metadata = [ordered]@{
+                  version = $version
+                  buildId = '$(Build.BuildId)'
+                  sourceVersion = '$(Build.SourceVersion)'
+                  createdUtc = [DateTime]::UtcNow.ToString('o')
+                } | ConvertTo-Json -Depth 4
+
+                Set-Content -Path (Join-Path $packageRoot 'build-metadata.json') -Value $metadata -Encoding UTF8
+
+                $zipPath = Join-Path $stagingRoot ('CERTAMENT-' + $version + '.zip')
+                if (Test-Path $zipPath) {
+                  Remove-Item $zipPath -Force
+                }
+
+                Compress-Archive -Path (Join-Path $packageRoot '*') -DestinationPath $zipPath -Force
+                Write-Host ('Package created: ' + $zipPath)
+
+          - publish: $(Build.ArtifactStagingDirectory)/certament
+            artifact: $(ArtifactName)
+            displayName: Publish artifact
