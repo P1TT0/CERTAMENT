@@ -85,8 +85,9 @@
                 -ErrorAction Stop
 
             Restart-NAVServerInstance -ServerInstance $name -ErrorAction Stop
+            Wait-BCInstanceRunning -ServerInstance $name -TimeoutSec 120
 
-            Write-Host "    Istanza aggiornata e riavviata."
+            Write-Host "    Istanza aggiornata, servizio Windows e stato NAV Running verificati."
             $entry.Result = 'UpdatedAndRestarted'
             $results += $entry
         }
@@ -101,6 +102,19 @@
     }
 
     return $results
+}
+
+function Wait-BCInstanceRunning {
+    param([string]$ServerInstance,[int]$TimeoutSec=120)
+    $deadline=(Get-Date).AddSeconds($TimeoutSec)
+    do {
+        $service=Get-Service -Name $ServerInstance -ErrorAction Stop
+        $nav=@(Get-NAVServerInstance -ErrorAction Stop|Where-Object{[string]$_.ServerInstance -eq $ServerInstance}|Select-Object -First 1)
+        if([string]$service.Status -eq 'Running' -and $nav.Count -eq 1 -and [string]$nav[0].State -eq 'Running'){return $true}
+        Start-Sleep -Seconds 2
+    } while((Get-Date)-lt $deadline)
+    $navState=if($nav.Count -eq 1){[string]$nav[0].State}else{'Missing'}
+    throw "BC instance $ServerInstance not Running after restart. WindowsService=$($service.Status); NAVState=$navState; TimeoutSec=$TimeoutSec"
 }
 
 Export-ModuleMember -Function Update-BCServiceCert

@@ -189,7 +189,12 @@ function Ensure-IISBinding([string]$site,[string]$bindingInformation,[string]$th
     Assert-True ($null -ne $b) "Binding HTTPS non trovato: $site / $bindingInformation"
         $b.AddSslCertificate((Normalize-Thumb $thumbprint),$store)|Out-Null
 }
-function Restart-BC([string]$instance){Restart-NAVServerInstance -ServerInstance $instance -ErrorAction Stop|Out-Null;Wait-ServiceState $instance 'Running' 120|Out-Null}
+function Wait-BCRunning([string]$instance,[int]$timeout=120){
+    $deadline=(Get-Date).AddSeconds($timeout)
+    do{$svc=Get-Service -Name $instance -ErrorAction Stop;$nav=@(Get-NAVServerInstance -ErrorAction Stop|Where-Object{[string]$_.ServerInstance -eq $instance}|Select-Object -First 1);if([string]$svc.Status -eq 'Running' -and $nav.Count -eq 1 -and [string]$nav[0].State -eq 'Running'){return $true};Start-Sleep -Seconds 2}while((Get-Date)-lt $deadline)
+    $navState=if($nav.Count -eq 1){[string]$nav[0].State}else{'Missing'};throw "BC $instance non Running dopo restart. WindowsService=$($svc.Status); NAVState=$navState"
+}
+function Restart-BC([string]$instance){Restart-NAVServerInstance -ServerInstance $instance -ErrorAction Stop|Out-Null;Wait-BCRunning $instance 120|Out-Null}
 
 function Get-HttpSslState {
     $raw=(& netsh http show sslcert 2>&1|Out-String);$rows=@();$cur=$null
@@ -288,10 +293,18 @@ function New-LabCert([string]$name,[string[]]$dns,[double]$validDays,[securestri
     $thumbprint=Normalize-Thumb $cert.Thumbprint;$script:LabThumbprints[$thumbprint]=$true
     return [pscustomobject]@{Thumbprint=$thumbprint;PfxPath=$pfx;FriendlyName=$name;NotBefore=$cert.NotBefore;NotAfter=$cert.NotAfter;Subject=$cert.Subject;DnsNames=@($dns)}
 }
-function Remove-LabCerts {
-    $labs=@(Get-ChildItem 'Cert:\LocalMachine\My' -ErrorAction Stop|Where-Object{$script:LabThumbprints.ContainsKey((Normalize-Thumb $_.Thumbprint))})
+function Remove-LabCerts($baseline=$null) {
+    $baselineThumbs=@{}
+    if($null -ne $baseline){foreach($cert in @($baseline.Certificates)){$baselineThumbs[(Normalize-Thumb $cert.Thumbprint)]=$true}}
+    $labs=@(Get-ChildItem 'Cert:\LocalMachine\My' -ErrorAction Stop|Where-Object{
+        $thumb=Normalize-Thumb $_.Thumbprint
+        (($script:LabThumbprints.ContainsKey($thumb)) -or (([string]$_.FriendlyName)-like 'CERTAMENT-LAB-*' -and -not $baselineThumbs.ContainsKey($thumb)))
+    })
     foreach($cert in $labs){Remove-Item ('Cert:\LocalMachine\My\'+$cert.Thumbprint) -Force -ErrorAction Stop}
-    $remaining=@(Get-ChildItem 'Cert:\LocalMachine\My' -ErrorAction Stop|Where-Object{$script:LabThumbprints.ContainsKey((Normalize-Thumb $_.Thumbprint))})
+    $remaining=@(Get-ChildItem 'Cert:\LocalMachine\My' -ErrorAction Stop|Where-Object{
+        $thumb=Normalize-Thumb $_.Thumbprint
+        (($script:LabThumbprints.ContainsKey($thumb)) -or (([string]$_.FriendlyName)-like 'CERTAMENT-LAB-*' -and -not $baselineThumbs.ContainsKey($thumb)))
+    })
     Assert-True ($remaining.Count -eq 0) 'Certificati CERTAMENT-LAB-* residui dopo cleanup.'
 }
 function Set-FileAge([string]$path,[datetime]$when){(Get-Item -LiteralPath $path).LastWriteTime=$when}
@@ -303,7 +316,7 @@ function Prepare-Common([string]$runDir,$before,[bool]$restartAfterUpdate=$true)
     return [pscustomobject]@{Site=$site;OldIisThumb=$oldIisThumb;OldTargetThumb=(Normalize-Thumb $oldTarget.Thumbprint);LabPfxDir=$labDir;LabPassword=$pw;SecurePassword=$sec;ModifiedHttp=@()}
 }
 function Prepare-Scenario([string]$name,[string]$runDir,$before){
-    Remove-LabCerts
+    Remove-LabCerts $before
     $prep=Prepare-Common $runDir $before $true
     $target=$TargetInstance
     $oldRef=$null;$newRef=$null;$badRef=$null
@@ -521,9 +534,9 @@ function Evaluate-Scenario($name,$exec,$before,$preparedState,$after,$prep){
     if($name -in @('HappyPath','RestartPolicy','MultiGroup','EndpointIdentityConfigured','EndpointWildcard')){
         if($exec.ExitCode -ne 0 -or $exec.TimedOut){return 'FAIL'}
         $target=Find-BCRow $after $TargetInstance;$newThumb=Normalize-Thumb $prep.New.Thumbprint;$site=$prep.Site;$iis=Find-IISBinding $after $site $TargetBinding
-        Assert-True ($null -ne $target) "Target BC assente dopo $name";Assert-True ($target.Thumbprint -eq $newThumb) "BC target non aggiornato: trovato $($target.Thumbprint), atteso $newThumb";Assert-True ($target.ServiceStatus -eq 'Running') "BC target non Running dopo $name";Assert-True ($null -ne $iis -and (Normalize-Thumb $iis.CertificateHash) -eq $newThumb) "IIS 443 non aggiornato a $newThumb"
+        Assert-True ($null -ne $target) "Target BC assente dopo $name";Assert-True ($target.Thumbprint -eq $newThumb) "BC target non aggiornato: trovato $($target.Thumbprint), atteso $newThumb";Assert-True ($target.ServiceStatus -eq 'Running') "BC target Windows Service non Running dopo $name";Assert-True ([string]$target.State -eq 'Running') "BC target NAV State non Running dopo $name";Assert-True ($null -ne $iis -and (Normalize-Thumb $iis.CertificateHash) -eq $newThumb) "IIS 443 non aggiornato a $newThumb"
         if($name -eq 'MultiGroup'){
-            $mgAfter=Find-BCRow $after 'MicrosoftDynamicsNavServer$PROD_NUP';Assert-True ($null -ne $mgAfter) 'PROD_NUP assente dopo MultiGroup';Assert-True ((Normalize-Thumb $mgAfter.Thumbprint) -eq $newThumb) 'PROD_NUP non aggiornato al nuovo certificato';Assert-True ([string]$mgAfter.ServiceStatus -eq 'Running') 'PROD_NUP non Running dopo MultiGroup'
+            $mgAfter=Find-BCRow $after 'MicrosoftDynamicsNavServer$PROD_NUP';Assert-True ($null -ne $mgAfter) 'PROD_NUP assente dopo MultiGroup';Assert-True ((Normalize-Thumb $mgAfter.Thumbprint) -eq $newThumb) 'PROD_NUP non aggiornato al nuovo certificato';Assert-True ([string]$mgAfter.ServiceStatus -eq 'Running' -and [string]$mgAfter.State -eq 'Running') 'PROD_NUP non Running dopo MultiGroup'
         }
         $required=@()
         if($name -eq 'MultiGroup'){
@@ -550,7 +563,7 @@ function Run-One([string]$name){
         Assert-True (@(Get-ChildItem 'Cert:\LocalMachine\My' -ErrorAction Stop|Where-Object{([string]$_.FriendlyName)-like 'CERTAMENT-LAB-*'}).Count -eq 0) 'Esistono gia certificati CERTAMENT-LAB-*; eseguire Recover/cleanup prima.'
         $before=New-Snapshot;Save-SnapshotArtifacts $before $runDir 'baseline' $true
         $prepInfo=Prepare-Scenario $name $runDir $before;$prepared=New-Snapshot;Save-SnapshotArtifacts $prepared $runDir 'prepared'
-        Save-Json (Get-PublicPreparation $prepInfo $runDir) (Join-Path $runDir 'prepared.json')
+        Save-Json (Get-PublicPreparation $prepInfo $runDir) (Join-Path $runDir 'prepared-metadata.json')
         $exec=Invoke-Certament $runDir
         $after=New-Snapshot;Save-SnapshotArtifacts $after $runDir 'post-run';$runtimeDrift=@(Get-Drift $prepared $after);Save-Json $runtimeDrift (Join-Path $runDir 'runtime-drift.json')
         $result=Evaluate-Scenario $name $exec $before $prepared $after $prepInfo
@@ -574,7 +587,7 @@ function Provision-One([string]$name){
         Assert-True (@(Get-ChildItem 'Cert:\LocalMachine\My' -ErrorAction Stop|Where-Object{([string]$_.FriendlyName)-like 'CERTAMENT-LAB-*'}).Count -eq 0) 'Esistono gia certificati CERTAMENT-LAB-*; eseguire Recover/cleanup prima.'
         $before=New-Snapshot;Save-SnapshotArtifacts $before $runDir 'baseline' $true
         $prepInfo=Prepare-Scenario $name $runDir $before;$prepared=New-Snapshot;Save-SnapshotArtifacts $prepared $runDir 'prepared'
-        Save-Json (Get-PublicPreparation $prepInfo $runDir) (Join-Path $runDir 'prepared.json')
+        Save-Json (Get-PublicPreparation $prepInfo $runDir) (Join-Path $runDir 'prepared-metadata.json')
         $result='PASS'
     }catch{$err=$_.Exception.ToString();$result='FAIL'}finally{
         if($null -ne $before){try{Restore-State $before $runDir}catch{$err += "`nRESTORE: $($_.Exception.ToString())";$restoreDrift=@('RestoreError')};try{$final=New-Snapshot;Save-SnapshotArtifacts $final $runDir 'post-restore';$restoreDrift=@(Get-Drift $before $final);Save-Json $restoreDrift (Join-Path $runDir 'restore-drift.json')}catch{$restoreDrift=@('VerificationError')}}

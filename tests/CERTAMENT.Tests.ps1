@@ -14,6 +14,10 @@ Describe 'CERTAMENT parser and static contracts' {
     It 'defines the monitoring API routes' { foreach($route in @('monitoring\Heartbeat\function.json','monitoring\Servers\function.json','monitoring\History\function.json','monitoring\Health\function.json')){Test-Path (Join-Path $root $route)|Should Be $true} }
     It 'does not expose heartbeat token to dashboard' { Get-Content (Join-Path $root 'monitoring\dashboard\app.js') -Raw|Should Not Match 'CERTAMENT_HEARTBEAT_TOKEN' }
     It 'does not use global iisreset in runtime files' { Get-Content (Join-Path $root 'modules\Update-IISBinding.psm1') -Raw|Should Not Match 'iisreset' }
+    It 'provisions real LAB certificates and target bindings' { $text=Get-Content $runner -Raw;foreach($pattern in @('New-SelfSignedCertificate','Export-PfxCertificate','Cert:\\LocalMachine\\My','Set-BCThumbprint','Ensure-IISBinding','Set-HttpSslThumb','New-Snapshot','Invoke-Certament')){$text|Should Match ([regex]::Escape($pattern))} }
+    It 'verifies BC service and NAV state after provisioning restart' { $text=Get-Content $runner -Raw;$text|Should Match 'Wait-BCRunning';$text|Should Match 'WindowsService';$text|Should Match 'NAVState' }
+    It 'keeps prepared snapshot separate from preparation metadata' { $text=Get-Content $runner -Raw;$text|Should Match "Save-SnapshotArtifacts \$prepared \$runDir 'prepared'";$text|Should Match 'prepared-metadata.json' }
+    It 'supports LAB cleanup after Recover without in-memory state' { $text=Get-Content $runner -Raw;$text|Should Match 'Remove-LabCerts \$before';$text|Should Match 'baselineThumbs' }
 }
 Describe 'PFX helper' {
     It 'enumerates PFX candidates deterministically' { Import-Module $module -Force; $temp=Join-Path ([IO.Path]::GetTempPath()) ('certament-pester-'+[guid]::NewGuid());New-Item $temp -ItemType Directory|Out-Null;try{1..2|ForEach-Object{[IO.File]::WriteAllBytes((Join-Path $temp ("$_.pfx")),[byte[]](1,2,3))};(@(Get-PfxCandidates $temp).Name -join ',')|Should Be '1.pfx,2.pfx'}finally{Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue} }

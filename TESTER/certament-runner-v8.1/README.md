@@ -117,7 +117,9 @@ Release candidate monitoring: Pester 17/17 PASS, parser PowerShell 5.1 PASS e No
 
 ## Artefatti
 
-I run vengono salvati sotto `C:\ProgramData\EOS\Certament\ScenarioRunnerV8\runs\...` con baseline, prepared, post-run, post-restore, drift, log CERTAMENT e log netsh.
+I run vengono salvati sotto `C:\ProgramData\EOS\Certament\ScenarioRunnerV8\runs\...` con baseline, `prepared.json` snapshot reale pre-CERTAMENT, `prepared-metadata.json`, post-run, post-restore, drift, log CERTAMENT e log netsh.
+
+Il provisioning e' verificabile anche senza eseguire CERTAMENT con `-Action Provision`: crea certificati LAB reali nello store `LocalMachine\My`, esporta PFX, assegna OLD a BC/IIS/HTTP.sys, salva lo snapshot reale e verifica il rollback. `Recover` usa la baseline serializzata per ripristinare anche dopo un processo separato, inclusa la rimozione dei certificati LAB creati dalla run.
 
 ## Limite di verifica
 
