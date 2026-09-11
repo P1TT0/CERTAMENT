@@ -14,6 +14,14 @@
 #>
 
 # --- Require Administrator ---
+$script:CertamentVersion = 'unknown'
+$script:RunId = [guid]::NewGuid().ToString('N')
+$script:RunStartedAt = Get-Date
+$script:HeartbeatCertificateDaysRemaining = $null
+$script:NotificationStatus = 'NotAttempted'
+$versionFile = Join-Path $PSScriptRoot 'VERSION.txt'
+if(Test-Path -LiteralPath $versionFile){$candidateVersion=(Get-Content -LiteralPath $versionFile -Raw).Trim();if(-not [string]::IsNullOrWhiteSpace($candidateVersion)){$script:CertamentVersion=$candidateVersion}}
+
 function Get-TestSleepSeconds {
     param([int]$Seconds)
     $scale = 1.0
@@ -171,6 +179,7 @@ $moduleDir = Join-Path $PSScriptRoot "modules"
     'Get-BCThumbprint',
     'Get-CertDetails',
     'Get-PfxFile',
+    'CertificateIdentity',
     'Install-PfxCert',
     'Update-BCServiceCert',
     'Update-IISBinding',
@@ -284,41 +293,15 @@ function Get-CertificateDnsNames {
 
 function Get-ConfiguredEndpointDnsNames {
     param([string]$SiteName,[string]$BindingInformation)
-    $configured=@();$configuredExpected=@()
-    if($config.IIS -and $config.IIS.PSObject.Properties['ExpectedDnsNames']){$configuredExpected+=@($config.IIS.ExpectedDnsNames);$configured+=@($configuredExpected)}
+    $configuredExpected=@()
+    if($config.IIS -and $config.IIS.PSObject.Properties['ExpectedDnsNames']){$configuredExpected+=@($config.IIS.ExpectedDnsNames)}
+    $hostHeaders=@()
     try {
         Import-Module WebAdministration -ErrorAction Stop
         $binding=Get-WebBinding -Name $SiteName -Protocol 'https' -ErrorAction Stop|Where-Object{[string]$_.BindingInformation -eq $BindingInformation}|Select-Object -First 1
-        if($null -ne $binding -and -not [string]::IsNullOrWhiteSpace([string]$binding.HostHeader)){$configured+=[string]$binding.HostHeader}
+        if($null -ne $binding -and -not [string]::IsNullOrWhiteSpace([string]$binding.HostHeader)){$hostHeaders+=[string]$binding.HostHeader}
     } catch { }
-    $normalized=@()
-    foreach($name in @($configured)){
-        $value=([string]$name -replace '\s+','').Trim().ToLowerInvariant()
-        if(-not [string]::IsNullOrWhiteSpace($value)){$normalized+=$value}
-    }
-    $expected=@($configuredExpected|ForEach-Object{([string]$_).Trim().ToLowerInvariant()}|Where-Object{-not [string]::IsNullOrWhiteSpace($_)}|Sort-Object -Unique)
-    $hostHeaders=@($normalized|Where-Object{$_ -notin $expected})
-    $conflict=($expected.Count -gt 0 -and $hostHeaders.Count -gt 0 -and -not (Test-DnsIdentityMatch -ExpectedNames $expected -CandidateNames $hostHeaders))
-    return [pscustomobject]@{ExpectedNames=$expected;HostHeaders=$hostHeaders;Names=@($expected);Conflict=$conflict}
-}
-
-function Test-DnsIdentityMatch {
-    param([string[]]$ExpectedNames,[string[]]$CandidateNames)
-    foreach($expected in @($ExpectedNames)){
-        foreach($candidate in @($CandidateNames)){
-            if($expected -eq $candidate){return $true}
-            if($expected.StartsWith('*.') -and (Test-WildcardDnsMatch $expected $candidate)){return $true}
-            if($candidate.StartsWith('*.') -and (Test-WildcardDnsMatch $candidate $expected)){return $true}
-        }
-    }
-    return $false
-}
-
-function Test-WildcardDnsMatch {
-    param([string]$Wildcard,[string]$Name)
-    $suffix=$Wildcard.Substring(2)
-    if([string]::IsNullOrWhiteSpace($suffix) -or $Name -notlike ('*.'+$suffix)){return $false}
-    return (($Name.Length - $suffix.Length - 1) -gt 0 -and ([string]$Name.Substring(0,$Name.Length-$suffix.Length-1) -notmatch '\.'))
+    return Resolve-EndpointDnsIdentity -ExpectedDnsNames $configuredExpected -HostHeaders $hostHeaders
 }
 
 function Test-PfxCandidate {
@@ -413,11 +396,14 @@ function Send-InternalNotification {
     $webhooks = Get-WebhookTable
     if (-not $webhooks.ContainsKey('Internal')) {
         Write-Warning "Webhook Internal non configurato. Notifica interna non inviata."
+        $script:NotificationStatus='Failed'
         return $false
     }
 
     $fullTitle = Get-CertamentTitle -BaseTitle $Title
-    return (Send-Notification -Title $fullTitle -Message $Message -Target "Internal" -Webhooks $webhooks)
+    $sent=(Send-Notification -Title $fullTitle -Message $Message -Target "Internal" -Webhooks $webhooks)
+    if($sent){$script:NotificationStatus='Sent'}else{$script:NotificationStatus='Failed'}
+    return $sent
 }
 
 # ============================================================
@@ -440,6 +426,7 @@ function Send-CustomerNotification {
     $fullTitle = Get-CertamentTitle -BaseTitle $Title
 
     if (-not $webhooks.ContainsKey('Customer')) {
+        $script:NotificationStatus='Failed'
         $detail = if ([string]::IsNullOrWhiteSpace($ContextLabel)) { "Webhook Customer non configurato" } else { $ContextLabel }
         Write-Warning "Webhook Customer non configurato."
         Invoke-Heartbeat -Status "NotificationFailed" -Stage "CustomerNotificationMissing" -Detail $detail | Out-Null
@@ -456,6 +443,7 @@ Invio notifica CUSTOMER non possibile su server **$env:COMPUTERNAME**.
     }
 
     $sent = Send-Notification -Title $fullTitle -Message $Message -Target "Customer" -Webhooks $webhooks
+    if($sent){$script:NotificationStatus='Sent'}else{$script:NotificationStatus='Failed'}
     if ($sent) { return $true }
 
     $failDetail = if ([string]::IsNullOrWhiteSpace($ContextLabel)) { "Invio notifica Customer fallito" } else { $ContextLabel }
@@ -532,6 +520,7 @@ function Get-HeartbeatSettings {
         Enabled                 = $enabled
         Url                     = $url
         TimeoutSec              = $timeoutSec
+        Token                   = if($config.Heartbeat -and $config.Heartbeat.Token){[string]$config.Heartbeat.Token}else{''}
         NotifyInternalOnFailure = $notifyInternalOnFailure
     }
 }
@@ -551,16 +540,24 @@ function Invoke-Heartbeat {
 
     $payload = @{
         tool      = "CERTAMENT"
+        schemaVersion = "1.0"
+        version   = $script:CertamentVersion
+        runId     = $script:RunId
         customer  = (Get-CustomerLabel)
         server    = $env:COMPUTERNAME
         status    = $Status
         stage     = $Stage
         detail    = $Detail
-        timestamp = (Get-Date).ToString('o')
+        timestampUtc = (Get-Date).ToUniversalTime().ToString('o')
+        durationSec = [math]::Round(((Get-Date)-$script:RunStartedAt).TotalSeconds,1)
+        certificateDaysRemaining = $script:HeartbeatCertificateDaysRemaining
+        notificationStatus = $script:NotificationStatus
     } | ConvertTo-Json -Depth 6
 
     try {
-        Invoke-RestMethod -Method POST -Uri $hb.Url -ContentType "application/json; charset=utf-8" `
+        $headers=@{}
+        if(-not [string]::IsNullOrWhiteSpace($hb.Token)){$headers['x-certament-token']=$hb.Token}
+        Invoke-RestMethod -Method POST -Uri $hb.Url -Headers $headers -ContentType "application/json; charset=utf-8" `
             -Body $payload -TimeoutSec $hb.TimeoutSec -ErrorAction Stop | Out-Null
         Write-Host "Heartbeat Azure inviato: $Status / $Stage"
         return $true
@@ -1307,6 +1304,7 @@ function Main {
     Write-Host ("=" * 60)
 
     $hostname = $env:COMPUTERNAME
+    Write-Host ("Versione CERTAMENT: {0} | RunId: {1}" -f $script:CertamentVersion,$script:RunId)
     $pfxPath = $config.Pfx.Path
     $hadPipelineErrors = $false
 
@@ -1362,6 +1360,7 @@ function Main {
         }
 
         $daysLeft = [math]::Floor(($certDetails.NotAfter - (Get-Date)).TotalDays)
+        $script:HeartbeatCertificateDaysRemaining=$daysLeft
         $certAlreadyExpired = $daysLeft -lt 0
         if ($certAlreadyExpired) { $daysLeft = 0 }
 
@@ -1453,7 +1452,7 @@ function Main {
         $endpointIdentity=Get-ConfiguredEndpointDnsNames -SiteName $iisSiteName -BindingInformation '*:443:'
         if($endpointIdentity.Conflict){throw 'Configurazione endpoint DNS incoerente: IIS.ExpectedDnsNames e HostHeader non coincidono.'}
         $expectedDnsNames=@($endpointIdentity.Names)
-        Write-Host ("Identita' DNS endpoint configurata: {0}" -f ($(if($expectedDnsNames.Count -gt 0){$expectedDnsNames -join ', '}else{'nessuna'})))
+        Write-Host ("Identita' DNS endpoint configurata: {0} -> {1}" -f $endpointIdentity.Source,$(if($expectedDnsNames.Count -gt 0){$expectedDnsNames -join ', '}else{'nessuna'}))
         $selection=Select-PfxCandidate -Candidates $pfxCandidates -Password $pfxPassword -CurrentCertificate $certDetails -ExpectedDnsNames $expectedDnsNames
         $selected=$selection.Selected
         if($null -eq $selected){
@@ -1772,6 +1771,7 @@ catch {
     Write-Error "Errore critico CERTAMENT: $($_.Exception.Message)"
     try { Invoke-Heartbeat -Status "Error" -Stage "UnhandledException" -Detail $_.Exception.Message | Out-Null } catch {}
     try { Send-FailureNotification -Context "Errore critico" -ErrorDetail $_.Exception.Message } catch {}
+    exit 1
 }
 finally {
     try { Stop-Transcript | Out-Null } catch {}

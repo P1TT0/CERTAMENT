@@ -105,16 +105,15 @@ stages:
                 }
 
           - task: PowerShell@2
-            displayName: Run Pester tests if present
+            displayName: Run mandatory Pester tests
             inputs:
               targetType: inline
               pwsh: false
               script: |
                 $testsPath = Join-Path '$(Build.SourcesDirectory)' 'tests'
-                if (-not (Test-Path $testsPath)) {
-                  Write-Host 'No tests folder found. Skipping Pester.'
-                  return
-                }
+                if (-not (Test-Path $testsPath)) { throw 'Required tests folder is missing.' }
+                $testFiles=@(Get-ChildItem -Path $testsPath -Filter '*.Tests.ps1' -Recurse -File)
+                if($testFiles.Count -eq 0){throw 'No Pester test files found.'}
 
                 $configuration = New-PesterConfiguration
                 $configuration.Run.Path = $testsPath
@@ -128,7 +127,10 @@ stages:
               targetType: inline
               pwsh: false
               script: |
-                $version = if ($env:BUILD_BUILDNUMBER) { $env:BUILD_BUILDNUMBER } else { '0.0.0-local' }
+                $versionFile=Join-Path '$(Build.SourcesDirectory)' 'VERSION.txt'
+                if(-not (Test-Path $versionFile)){throw 'VERSION.txt is missing.'}
+                $version=(Get-Content $versionFile -Raw).Trim()
+                if([string]::IsNullOrWhiteSpace($version)){throw 'VERSION.txt is empty.'}
                 $stagingRoot = Join-Path '$(Build.ArtifactStagingDirectory)' 'certament'
                 $packageRoot = Join-Path $stagingRoot $version
 
@@ -136,12 +138,15 @@ stages:
 
                 $include = @(
                   '_MAINCertManager.ps1',
+                  'VERSION.txt',
                   'Install-Certament.ps1',
                   'Install-Certament.cmd',
                   'Uninstall-Certament.ps1',
                   'config.example.json',
                   'modules',
                   'tools',
+                  'monitoring',
+                  'tests',
                   'docs'
                 )
 

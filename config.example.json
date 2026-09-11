@@ -34,7 +34,9 @@
   },
   "Heartbeat": {
     "Enabled": true,
+    "SchemaVersion": "1.0",
     "Url": "<SET_AZURE_HEARTBEAT_URL>",
+    "Token": "<SET_HEARTBEAT_TOKEN_OUTSIDE_REPOSITORY>",
     "TimeoutSec": 10,
     "NotifyInternalOnFailure": true
   }

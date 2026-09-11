@@ -17,6 +17,8 @@ param(
 
 Set-StrictMode -Off
 $ErrorActionPreference = 'Stop'
+$versionFile = Join-Path $PSScriptRoot 'VERSION.txt'
+$CertamentVersion = if (Test-Path -LiteralPath $versionFile) { (Get-Content -LiteralPath $versionFile -Raw).Trim() } else { 'unknown' }
 
 # ============================================================
 # Helpers
@@ -116,7 +118,7 @@ function Write-BannerLines {
     }
     Write-Host ""
     Write-Host "  $hLine" -ForegroundColor DarkGray
-    Write-Host "   Automated Certificate Manager for BC + IIS                              v1.0.0.0.0.0.0.0.0.1" -ForegroundColor Gray
+    Write-Host "   Automated Certificate Manager for BC + IIS                              v$CertamentVersion" -ForegroundColor Gray
     Write-Host "   $env:COMPUTERNAME  $([char]0x00B7)  $(Get-Date -Format 'yyyy-MM-dd HH:mm')" -ForegroundColor DarkGray
     Write-Host "  $hLine" -ForegroundColor DarkGray
     Write-Host ''
@@ -268,7 +270,7 @@ function Write-AnimatedBanner {
     Write-Host ""
 
     # --- Phase 6: Typewriter info ---
-    $infoText   = "   Automated Certificate Manager for BC + IIS                              v1.0.0.0.0.0.0.0.0.1"
+    $infoText   = "   Automated Certificate Manager for BC + IIS                              v$CertamentVersion"
     $serverText = "   $env:COMPUTERNAME  $([char]0x00B7)  $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
 
     foreach ($ch in $infoText.ToCharArray()) {
@@ -983,7 +985,7 @@ function Invoke-Install {
         if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
     }
 
-    foreach ($file in @('_MAINCertManager.ps1', 'config.example.json', 'Install-Certament.ps1')) {
+    foreach ($file in @('_MAINCertManager.ps1', 'VERSION.txt', 'config.example.json', 'Install-Certament.ps1')) {
         $src = Join-Path $sourceDir $file
         if (Test-Path $src) {
             Copy-Item -Path $src -Destination $installPath -Force

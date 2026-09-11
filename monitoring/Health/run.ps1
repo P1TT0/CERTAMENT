@@ -1,0 +1,3 @@
+. "$PSScriptRoot\..\shared\Storage.ps1"
+param($Request,$TriggerMetadata)
+try{$table=Get-TableHandle $env:CERTAMENT_LATEST_TABLE;$rows=@(Get-AzTableRow -table $table -partitionKey 'server');$critical=@($rows|Where-Object Status -eq 'Critical').Count;$warning=@($rows|Where-Object Status -eq 'Warning').Count;$status=if($critical -gt 0){'Critical'}elseif($warning -gt 0){'Warning'}else{'Healthy'};Push-OutputBinding -Name Response -Value (New-JsonResponse 200 @{status=$status;servers=$rows.Count;critical=$critical;warning=$warning;timestampUtc=[DateTime]::UtcNow.ToString('o')})}catch{Push-OutputBinding -Name Response -Value (New-JsonResponse 500 @{status='Critical';error=$_.Exception.Message})}

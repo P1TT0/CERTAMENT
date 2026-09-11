@@ -1,0 +1,10 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "<SET_OUTSIDE_REPOSITORY>",
+    "FUNCTIONS_WORKER_RUNTIME": "powershell",
+    "CERTAMENT_HEARTBEAT_TOKEN": "<SET_OUTSIDE_REPOSITORY>",
+    "CERTAMENT_LATEST_TABLE": "CertamentLatest",
+    "CERTAMENT_HISTORY_TABLE": "CertamentHistory"
+  }
+}
