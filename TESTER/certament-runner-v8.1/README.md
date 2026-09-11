@@ -83,6 +83,23 @@ Recovery:
 
 `FAIL` = errore del runner, restore incompleto, precondizioni errate oppure comportamento CERTAMENT non conforme allo scenario.
 
+## V8.1 endpoint identity review
+
+La validazione dell'identita' del certificato usa questa gerarchia:
+
+1. `IIS.ExpectedDnsNames` configurato;
+2. `HostHeader` del binding HTTPS IIS;
+3. rifiuto fail-closed se nessuna identita' endpoint e' disponibile.
+
+Il SAN del certificato precedente viene usato come confronto diagnostico, non come autorita' DNS assoluta. Gli scenari `EndpointIdentityMissing` e `EndpointIdentityConfigured` dimostrano rispettivamente il rifiuto fail-closed e l'accettazione di un nuovo certificato coerente con l'endpoint anche quando il certificato precedente ha un SAN legacy.
+
+Ultima verifica runtime sulla VM:
+
+- Core: 10/10 PASS, 0 EXPECTED-GAP, 0 FAIL;
+- Renewal: 4/4 PASS, 0 EXPECTED-GAP, 0 FAIL;
+- baseline ripristinata in ogni scenario;
+- `RestoreDrift` vuoto in ogni scenario.
+
 ## Artefatti
 
 I run vengono salvati sotto `C:\ProgramData\EOS\Certament\ScenarioRunnerV8\runs\...` con baseline, prepared, post-run, post-restore, drift, log CERTAMENT e log netsh.
