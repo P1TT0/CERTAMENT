@@ -113,6 +113,8 @@ La pipeline runtime ora interrompe il gruppo dopo errori BC/SSL/URLACL, richiede
 
 Revisione transazionale corrente: Core 10/10 PASS e Renewal 5/5 PASS, con baseline ripristinata e `RestoreDrift` vuoto in tutti gli scenari verificati. Il commit strutturale e' `235d399`.
 
+Release candidate monitoring: Pester 17/17 PASS, parser PowerShell 5.1 PASS e NoOp E2E PASS sulla runtime finale. Il monitoring Azure Function/Table Storage/dashboard e' incluso come MVP, ma il deploy live Azure richiede ancora storage, token e configurazione esterni.
+
 ## Artefatti
 
 I run vengono salvati sotto `C:\ProgramData\EOS\Certament\ScenarioRunnerV8\runs\...` con baseline, prepared, post-run, post-restore, drift, log CERTAMENT e log netsh.
