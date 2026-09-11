@@ -402,7 +402,7 @@ function Send-InternalNotification {
 
     $fullTitle = Get-CertamentTitle -BaseTitle $Title
     $sent=(Send-Notification -Title $fullTitle -Message $Message -Target "Internal" -Webhooks $webhooks)
-    if($sent){$script:NotificationStatus='Sent'}else{$script:NotificationStatus='Failed'}
+    if(-not $sent){$script:NotificationStatus='Failed'}elseif($script:NotificationStatus -ne 'Failed'){$script:NotificationStatus='Sent'}
     return $sent
 }
 
@@ -443,7 +443,7 @@ Invio notifica CUSTOMER non possibile su server **$env:COMPUTERNAME**.
     }
 
     $sent = Send-Notification -Title $fullTitle -Message $Message -Target "Customer" -Webhooks $webhooks
-    if($sent){$script:NotificationStatus='Sent'}else{$script:NotificationStatus='Failed'}
+    if(-not $sent){$script:NotificationStatus='Failed'}elseif($script:NotificationStatus -ne 'Failed'){$script:NotificationStatus='Sent'}
     if ($sent) { return $true }
 
     $failDetail = if ([string]::IsNullOrWhiteSpace($ContextLabel)) { "Invio notifica Customer fallito" } else { $ContextLabel }
