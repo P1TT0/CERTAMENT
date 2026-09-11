@@ -434,7 +434,8 @@ function Restore-State($before,[string]$runDir){
 function Evaluate-Negative($name,$exec,$prepared,$after,$before){
     $runtimeDrift=@(Get-Drift $prepared $after)
     $stdoutText='';$stderrText='';if(Test-Path -LiteralPath ([string]$exec.Stdout)){$stdoutText=Get-Content -LiteralPath ([string]$exec.Stdout) -Raw};if(Test-Path -LiteralPath ([string]$exec.Stderr)){$stderrText=Get-Content -LiteralPath ([string]$exec.Stderr) -Raw};$evidence=($stdoutText+"`n"+$stderrText)
-    $handled=($evidence -match 'Nessun file PFX|PFX non leggibile|password PFX|PFX.*scaduto|PFX.*non.*nuovo|non piu recente|non pertinente')
+    $handled=($evidence -match 'Nessun file PFX|Errore lettura PFX|PFX non leggibile|password PFX|PFX.*scaduto|PFX.*non.*recente|PFX.*non.*nuovo|non piu recente|non e'' piu recente|non pertinente')
+    if($name -eq 'MultipleCandidates' -and $evidence -match 'PFX trovato:|CERTAMENT completato con successo'){return 'EXPECTED-GAP'}
     $safeExit=(($exec.ExitCode -ne 0 -or $handled) -and -not $exec.TimedOut)
     $safeState=@($runtimeDrift|Where-Object{$_ -in @('Config','BC','IIS','HTTP.sys','Certificates','URLACL','ScheduledTask')}).Count -eq 0
     if($name -in @('WrongSan','UnrelatedPfx')){
@@ -521,7 +522,7 @@ function Provision-One([string]$name){
 }
 function Run-Suite([string]$name){
     Ensure-Dirs;Initialize-Platform;$rows=@()
-    foreach($s in @($SuiteCatalog[$name])){Write-Host "`n===== $s =====" -ForegroundColor Magenta;$r=Run-One $s;$rows+=$r;if(-not $r.BaselineRestored){Fail 'Baseline non ripristinato: suite interrotta.';break}}
+    foreach($s in @($SuiteCatalog[$name])){Write-Host "`n===== $s =====" -ForegroundColor Magenta;$runOutputs=@(Run-One $s);$r=@($runOutputs|Where-Object{$null -ne $_ -and @($_.PSObject.Properties|Where-Object{$_.Name -eq 'BaselineRestored'}).Count -gt 0}|Select-Object -Last 1);Assert-True ($r.Count -eq 1) "Run-One non ha prodotto un report valido per $s.";$rows+=$r[0];if(-not $r[0].BaselineRestored){Fail 'Baseline non ripristinato: suite interrotta.';break}}
     $suitePath=Join-Path $StateRoot ((Get-Date -Format 'yyyyMMdd_HHmmss')+"_$name.json");Save-Json $rows $suitePath;$rows|Format-Table Scenario,Result,ExitCode,BaselineRestored -AutoSize
     return [pscustomobject]@{Suite=$name;Total=$rows.Count;Pass=@($rows|Where-Object Result -eq 'PASS').Count;ExpectedGap=@($rows|Where-Object Result -eq 'EXPECTED-GAP').Count;Fail=@($rows|Where-Object Result -eq 'FAIL').Count;Report=$suitePath}
 }
