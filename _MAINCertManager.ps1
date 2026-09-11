@@ -1080,10 +1080,12 @@ function Test-BCPostUpdate {
 # ============================================================
 function Get-IISBindingSnapshot {
     param(
-        [string]$SiteName = "Microsoft Dynamics 365 Business Central Web Client"
+        [string]$SiteName = "Microsoft Dynamics 365 Business Central Web Client",
+        [string]$Thumbprint = ''
     )
 
     $snapshot = @()
+    $thumbFilter=($Thumbprint -replace '\s','').ToUpper()
 
     try {
         if (-not ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq "Microsoft.Web.Administration" })) {
@@ -1102,6 +1104,7 @@ function Get-IISBindingSnapshot {
             if ($binding.CertificateHash) {
                 $thumb = ([System.BitConverter]::ToString($binding.CertificateHash) -replace '-', '').ToUpper()
             }
+            if($thumbFilter -and $thumb -ne $thumbFilter){continue}
             $snapshot += [PSCustomObject]@{
                 BindingInformation   = $binding.BindingInformation
                 CertificateStoreName = $(if ($binding.CertificateStoreName) { $binding.CertificateStoreName } else { 'My' })
@@ -1253,7 +1256,8 @@ function Repair-IISBindings {
 function Test-IISPostUpdate {
     param(
         [string]$ExpectedThumbprint,
-        [string]$SiteName = "Microsoft Dynamics 365 Business Central Web Client"
+        [string]$SiteName = "Microsoft Dynamics 365 Business Central Web Client",
+        [array]$BindingSnapshot = @()
     )
 
     $expectedNorm = ($ExpectedThumbprint -replace '\s', '').ToUpper()
@@ -1270,7 +1274,9 @@ function Test-IISPostUpdate {
         $site = $sm.Sites[$SiteName]
         if (-not $site) { return @("Sito '$SiteName' non trovato in IIS") }
 
-        foreach ($binding in $site.Bindings) {
+        if($BindingSnapshot.Count -eq 0){return @()}
+        $scopedBindings=@($site.Bindings|Where-Object{$bindingInfo=[string]$_.BindingInformation;@($BindingSnapshot|Where-Object{[string]$_.BindingInformation -eq $bindingInfo}).Count -gt 0})
+        foreach ($binding in $scopedBindings) {
             if ($binding.Protocol -ne 'https') { continue }
             $bindingInfo = $binding.BindingInformation
             if ($binding.CertificateHash) {
@@ -1394,6 +1400,7 @@ function Main {
     $passwordFile = Join-Path $pfxPath "password.txt"
 
     foreach ($expiring in $expiringCerts) {
+        if($hadPipelineErrors){Write-Warning 'Pipeline interrotta dopo un errore precedente; nessun gruppo successivo verra aggiornato.';break}
         $oldThumb      = $expiring.Group.Thumbprint
         $certDetails   = $expiring.CertDetails
         $daysLeft      = $expiring.DaysLeft
@@ -1497,8 +1504,11 @@ function Main {
         }
 
         # ---- Persist snapshots to disk (safety net for crash recovery) ----
-        $null = Save-BindingSnapshot -OldThumbprint $oldThumb -NewThumbprint $newThumb `
+        $snapshotPath=Save-BindingSnapshot -OldThumbprint $oldThumb -NewThumbprint $newThumb `
             -SslSnapshot $sslSnapshot -UrlAclSnapshot $urlAclSnapshot
+        if([string]::IsNullOrWhiteSpace([string]$snapshotPath) -or -not (Test-Path -LiteralPath $snapshotPath)){
+            throw "Snapshot persistence fallita prima dell'aggiornamento BC per $oldThumb"
+        }
 
         # ---- Step 6: Update BC (only instances using the old certificate) ----
         Write-Host "[6] Aggiornamento istanze Business Central (vecchio thumb: $oldThumb)..."
@@ -1534,6 +1544,11 @@ function Main {
         }
         else {
             Write-Host "Verifica BC OK: thumbprint e stato Running confermati."
+        }
+
+        if($hadPipelineErrors){
+            Write-Warning 'Errore BC: pipeline interrotta prima di SSL, URLACL, IIS, notifiche e archivio.'
+            continue
         }
 
         # --- Post-BC SSL binding verification + repair ---
@@ -1604,13 +1619,18 @@ function Main {
             else {
                 Write-Host "Verifica URL ACL: tutte presenti."
             }
+
+            if($hadPipelineErrors){
+                Write-Warning 'Errore SSL/URLACL: pipeline interrotta prima di IIS, notifiche e archivio.'
+                continue
+            }
         }
 
         # ---- Step 7: Update IIS (only bindings using the old certificate) ----
         Write-Host "`n[7] Aggiornamento binding IIS (vecchio thumb: $oldThumb)..."
 
         # Snapshot HTTPS bindings BEFORE update (safety net for repair)
-        $iisSnapshot = Get-IISBindingSnapshot -SiteName $iisSiteName
+        $iisSnapshot = Get-IISBindingSnapshot -SiteName $iisSiteName -Thumbprint $oldThumb
         if ($iisSnapshot.Count -gt 0) {
             Write-Host ("  Snapshot acquisito: {0} binding HTTPS." -f $iisSnapshot.Count)
         }
@@ -1619,8 +1639,11 @@ function Main {
         }
 
         # Update persisted snapshot with IIS data
-        $null = Save-BindingSnapshot -OldThumbprint $oldThumb -NewThumbprint $newThumb `
+        $snapshotPath=Save-BindingSnapshot -OldThumbprint $oldThumb -NewThumbprint $newThumb `
             -SslSnapshot $sslSnapshot -UrlAclSnapshot $urlAclSnapshot -IISSnapshot $iisSnapshot
+        if([string]::IsNullOrWhiteSpace([string]$snapshotPath) -or -not (Test-Path -LiteralPath $snapshotPath)){
+            throw "Snapshot persistence IIS fallita per $oldThumb"
+        }
 
         try {
             $iisResults = Update-IISBinding -NewThumbprint $newThumb -OldThumbprint $oldThumb -SiteName $iisSiteName -RestartIIS:$iisRestart
@@ -1633,21 +1656,19 @@ function Main {
 
         # --- Post-IIS verification with auto-remediation ---
         Write-Host "`nVerifica post-aggiornamento IIS..."
-        $iisVerifyErrors = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName
+        $iisVerifyErrors = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName -BindingSnapshot $iisSnapshot
         if ($iisVerifyErrors) {
             Write-Warning "Verifica IIS fallita: $($iisVerifyErrors -join '; ')"
-            # Retry WITHOUT OldThumbprint filter: if the binding has a different/unknown cert,
-            # force-update it since post-verification already confirmed it's wrong.
-            Write-Host "Retry aggiornamento IIS (senza filtro OldThumbprint, con restart forzato)..."
+            Write-Host "Retry aggiornamento IIS scoped al vecchio thumbprint..."
             try {
-                $iisRetry = Update-IISBinding -NewThumbprint $newThumb -SiteName $iisSiteName -RestartIIS
+                $iisRetry = Update-IISBinding -NewThumbprint $newThumb -OldThumbprint $oldThumb -SiteName $iisSiteName -RestartIIS:$iisRestart
                 if ($iisRetry) { $iisRetry | Format-Table -AutoSize }
             }
             catch {
                 Write-Warning "Retry IIS fallito: $($_.Exception.Message)"
             }
             Start-Sleep -Seconds (Get-TestSleepSeconds 10)
-            $iisVerifyErrors2 = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName
+            $iisVerifyErrors2 = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName -BindingSnapshot $iisSnapshot
             if ($iisVerifyErrors2) {
                 # Last resort: repair from snapshot (recreates missing bindings)
                 Write-Host "Tentativo repair binding IIS da snapshot..."
@@ -1659,12 +1680,10 @@ function Main {
 
                 if ($repairSuccess.Count -gt 0) {
                     Write-Host "Repair IIS: corretti/ricreati $($repairSuccess.Count) binding."
-                    # Restart IIS after repair to ensure bindings are active
-                    try { iisreset /noforce | Out-Null; Write-Host "IIS riavviato dopo repair." } catch { Write-Warning "iisreset fallito: $($_.Exception.Message)" }
                     Start-Sleep -Seconds (Get-TestSleepSeconds 5)
 
                     # Final verification after repair
-                    $iisVerifyErrors3 = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName
+                    $iisVerifyErrors3 = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName -BindingSnapshot $iisSnapshot
                     if ($iisVerifyErrors3) {
                         $errDetail = $iisVerifyErrors3 -join "; "
                         Send-FailureNotification -Context "Verifica post-aggiornamento IIS" -ErrorDetail "Fallita anche dopo repair da snapshot: $errDetail"
@@ -1712,20 +1731,23 @@ Nuovo certificato installato $certStatusLabel su server **$hostname**.
         }
         $null = Send-InternalNotification -Title $certNotifTitle -Message $certMsg
 
-        # --- Post-pipeline cleanup: archive PFX (password.txt deleted once at end) ---
-        $installedDir = Join-Path $pfxPath "installed"
-        if (-not (Test-Path $installedDir)) { New-Item -ItemType Directory -Path $installedDir -Force | Out-Null }
-        try {
-            Move-Item -Path $pfxFile -Destination $installedDir -Force
-            Write-Host "PFX archiviato in: $installedDir"
-        }
-        catch {
-            Write-Warning "Impossibile archiviare PFX: $($_.Exception.Message)"
+        # Archive only after the complete group pipeline has succeeded.
+        if(-not $hadPipelineErrors){
+            $installedDir = Join-Path $pfxPath "installed"
+            if (-not (Test-Path $installedDir)) { New-Item -ItemType Directory -Path $installedDir -Force | Out-Null }
+            try {
+                Move-Item -Path $pfxFile -Destination $installedDir -Force
+                Write-Host "PFX archiviato in: $installedDir"
+            }
+            catch {
+                Write-Warning "Impossibile archiviare PFX: $($_.Exception.Message)"
+                $hadPipelineErrors=$true
+            }
         }
     }
 
     # --- Cleanup: delete password.txt after all renewals ---
-    if (Test-Path $passwordFile) {
+    if (-not $hadPipelineErrors -and (Test-Path $passwordFile)) {
         Remove-Item -Path $passwordFile -Force -ErrorAction SilentlyContinue
         Write-Host "File password.txt eliminato."
     }

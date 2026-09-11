@@ -2,7 +2,12 @@
     [CmdletBinding()]
     param()
 
-    $instances = Get-NAVServerInstance
+    try {
+        $instances = @(Get-NAVServerInstance -ErrorAction Stop)
+    }
+    catch {
+        throw "BC discovery failed: $($_.Exception.Message)"
+    }
 
     # Build a map: thumbprint -> list of instance names
     $thumbInstanceMap = @{}
@@ -22,7 +27,7 @@
             $thumbprint = Get-NAVServerConfiguration -ServerInstance $instance.ServerInstance -KeyName "ServicesCertificateThumbprint"
         }
         catch {
-            continue
+            throw "BC certificate configuration unreadable for $($instance.ServerInstance): $($_.Exception.Message)"
         }
 
         if ($thumbprint -and $thumbprint.Trim() -ne "") {

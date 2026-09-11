@@ -17,6 +17,8 @@
 
 Sono pianificati scenari dedicati per BC aggiornato + IIS failure, IIS aggiornato + HTTP.sys failure, snapshot failure, archive failure e conflitti di binding/permessi. Non sono ancora implementati; quando verranno aggiunti dovranno verificare rollback e `RestoreDrift` prima di classificare il risultato.
 
+IIS scope test: la verifica e il retry usano il vecchio thumbprint e lo snapshot del certificate-group corrente; binding HTTPS con certificati differenti devono restare invariati. La copertura automatica con due binding distinti e fault injection controllata e' ancora da aggiungere.
+
 ## Limite dichiarato
 
 La sandbox corrente non può eseguire realmente Windows PowerShell 5.1, IIS e Business Central. Il runtime finale deve essere eseguito sulla VM; il runner è progettato affinché eventuali errori siano osservabili nei log e, soprattutto, affinché il restore fallito porti a `FAIL` invece di mascherare il problema.

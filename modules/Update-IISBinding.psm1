@@ -115,14 +115,7 @@
     }
 
     if ($RestartIIS.IsPresent) {
-        try {
-            Write-Host "Riavvio IIS..."
-            iisreset /noforce | Out-Null
-            Write-Host "IIS riavviato."
-        }
-        catch {
-            Write-Warning ("Errore durante iisreset: {0}" -f $_.Exception.Message)
-        }
+        Write-Host "Binding IIS committati; nessun riavvio IIS globale richiesto."
     }
 
     return $results
