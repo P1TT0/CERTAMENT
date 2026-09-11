@@ -32,9 +32,9 @@ $ScenarioCatalog = [ordered]@{
     WrongPassword      = 'PFX valido ma password errata; atteso: nessuna modifica.'
     PfxExpired         = 'PFX contiene certificato gia scaduto; atteso: nessuna modifica.'
     PfxNotNewer        = 'PFX contiene certificato non piu nuovo del certificato corrente; atteso: nessuna modifica.'
-    WrongSan           = 'PFX valido ma SAN non pertinente; GAP atteso sulla release corrente se viene accettato.'
-    MultipleCandidates = 'Due PFX pertinenti: uno migliore ma meno recente come file; testa la selezione del candidato.'
-    UnrelatedPfx       = 'PFX piu recente ma SAN non pertinente; GAP atteso sulla release corrente se viene accettato.'
+    WrongSan           = 'PFX valido ma SAN non pertinente; deve essere rifiutato senza aggiornamenti.'
+    MultipleCandidates = 'Due PFX pertinenti; deve essere scelto deterministicamente il certificato migliore.'
+    UnrelatedPfx       = 'PFX piu recente ma SAN non pertinente; deve essere rifiutato senza aggiornamenti.'
     AlreadyCurrent     = 'BC e IIS gia sul certificato LAB nuovo; atteso: no-op.'
     HappyPath          = 'Rinnovo coerente di PROD_NUP2: BC, IIS e HTTP.sys puntano al vecchio LAB prima del run.'
     MultiGroup         = 'Un solo certificato vecchio LAB condiviso da PROD_NUP + PROD_NUP2; atteso: entrambi aggiornati.'
@@ -365,7 +365,7 @@ function Prepare-Scenario([string]$name,[string]$runDir,$before){
         foreach($h in @($before.HttpSSL|Where-Object{(Normalize-Thumb $_.CertHash) -eq $prep.OldIisThumb})){
             Set-HttpSslThumb $h $newRef.Thumbprint (Join-Path $runDir 'http-prepare.log')
         }
-        return [pscustomobject]@{Site=$prep.Site;Target=$target;Old=$null;New=$newRef;Bad=$null;ModifiedHttp=@();LabPfxDir=$prep.LabPfxDir;OldIisThumb=$prep.OldIisThumb;OldTargetThumb=$prep.OldTargetThumb}
+        return [pscustomobject]@{RunDir=$runDir;Site=$prep.Site;Target=$target;Old=$null;New=$newRef;Bad=$null;ModifiedHttp=@();LabPfxDir=$prep.LabPfxDir;OldIisThumb=$prep.OldIisThumb;OldTargetThumb=$prep.OldTargetThumb}
     }
     if($null -eq $oldRef){throw "Scenario $name non ha generato un certificato OLD."}
     $oldThumbs=@($prep.OldTargetThumb)
@@ -379,7 +379,7 @@ function Prepare-Scenario([string]$name,[string]$runDir,$before){
     foreach($h in @($before.HttpSSL|Where-Object{$oldThumbs -contains (Normalize-Thumb $_.CertHash)})){
         Set-HttpSslThumb $h $oldRef.Thumbprint (Join-Path $runDir 'http-prepare.log');$httpChanged += [string]$h.Endpoint
     }
-    return [pscustomobject]@{Site=$prep.Site;Target=$target;Old=$oldRef;New=$newRef;Bad=$badRef;ModifiedHttp=@($httpChanged);LabPfxDir=$prep.LabPfxDir;OldIisThumb=$prep.OldIisThumb;OldTargetThumb=$prep.OldTargetThumb}
+    return [pscustomobject]@{RunDir=$runDir;Site=$prep.Site;Target=$target;Old=$oldRef;New=$newRef;Bad=$badRef;ModifiedHttp=@($httpChanged);LabPfxDir=$prep.LabPfxDir;OldIisThumb=$prep.OldIisThumb;OldTargetThumb=$prep.OldTargetThumb}
 }
 
 function Get-PublicPreparation($prep,[string]$runDir){
@@ -472,11 +472,15 @@ function Restore-State($before,[string]$runDir){
 function Evaluate-Negative($name,$exec,$prepared,$after,$before){
     $runtimeDrift=@(Get-Drift $prepared $after)
     $stdoutText='';$stderrText='';if(Test-Path -LiteralPath ([string]$exec.Stdout)){$stdoutText=Get-Content -LiteralPath ([string]$exec.Stdout) -Raw};if(Test-Path -LiteralPath ([string]$exec.Stderr)){$stderrText=Get-Content -LiteralPath ([string]$exec.Stderr) -Raw};$evidence=($stdoutText+"`n"+$stderrText)
-    $handled=($evidence -match 'Nessun file PFX|Errore lettura PFX|PFX non leggibile|password PFX|PFX.*scaduto|PFX.*non.*recente|PFX.*non.*nuovo|non piu recente|non e'' piu recente|non pertinente')
-    if($name -eq 'MultipleCandidates' -and $evidence -match 'PFX trovato:|CERTAMENT completato con successo'){return 'EXPECTED-GAP'}
-    $safeExit=(($exec.ExitCode -ne 0 -or $handled) -and -not $exec.TimedOut)
+    $handled=($evidence -match 'Nessun file PFX|Nessun PFX valido e pertinente|Errore lettura PFX|PFX non leggibile|password PFX|PFX.*scaduto|PFX.*non.*recente|PFX.*non.*nuovo|non piu recente|non e'' piu recente|non pertinente')
     $safeState=@($runtimeDrift|Where-Object{$_ -in @('Config','BC','IIS','HTTP.sys','Certificates','URLACL','ScheduledTask')}).Count -eq 0
+    if($name -eq 'MultipleCandidates'){
+        if($evidence -match 'PFX selezionato: .*GOOD\.pfx' -and $exec.ExitCode -eq 0 -and -not $exec.TimedOut){return 'PASS'}
+        if($evidence -match 'PFX selezionato:'){return 'EXPECTED-GAP'}
+    }
+    $safeExit=(($exec.ExitCode -ne 0 -or $handled) -and -not $exec.TimedOut)
     if($name -in @('WrongSan','UnrelatedPfx')){
+        if($evidence -match 'Nessun PFX valido e pertinente trovato' -and $safeState){return 'PASS'}
         if($safeExit -and $safeState){return 'PASS'}
         return 'EXPECTED-GAP'
     }

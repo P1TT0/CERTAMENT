@@ -7,9 +7,9 @@
 - **WrongPassword** — PFX valido ma password errata; atteso rifiuto senza modifiche runtime.
 - **PfxExpired** — PFX leggibile ma certificato già scaduto; atteso rifiuto senza installazione.
 - **PfxNotNewer** — PFX con `NotAfter` non maggiore del certificato corrente; atteso rifiuto.
-- **WrongSan** — PFX valido ma SAN non pertinente; se la release lo installa/usa viene classificato `EXPECTED-GAP`.
-- **MultipleCandidates** — PFX pertinenti multipli; uno migliore ma meno recente come file. Serve a dimostrare la selezione per `LastWriteTime` della release corrente.
-- **UnrelatedPfx** — PFX più recente ma identità non pertinente; se viene usato è `EXPECTED-GAP`.
+- **WrongSan** — PFX valido ma SAN non pertinente; deve essere rifiutato.
+- **MultipleCandidates** — PFX pertinenti multipli; deve essere scelto deterministicamente il certificato con validita' migliore.
+- **UnrelatedPfx** — PFX più recente ma identita' non pertinente; deve essere rifiutato.
 - **AlreadyCurrent** — BC target, IIS 443 e HTTP.sys già sul certificato LAB nuovo; atteso no-op.
 
 ## Renewal

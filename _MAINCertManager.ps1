@@ -274,6 +274,50 @@ function Exit-WithCode {
     exit $Code
 }
 
+
+function Get-CertificateDnsNames {
+    param([object]$Certificate)
+    if($null -ne $Certificate.DnsNameList){return @($Certificate.DnsNameList | ForEach-Object { [string]$_.Unicode } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })}
+    if($null -ne $Certificate.DnsNames){return @(([string]$Certificate.DnsNames -split ',')|ForEach-Object{$_.Trim()}|Where-Object{-not [string]::IsNullOrWhiteSpace($_)})}
+    return @()
+}
+
+function Test-PfxCandidate {
+    param(
+        [object]$Certificate,
+        [object]$CurrentCertificate
+    )
+
+    $targetNames=@(Get-CertificateDnsNames $CurrentCertificate | ForEach-Object { $_.Trim().ToLowerInvariant() })
+    $candidateNames=@(Get-CertificateDnsNames $Certificate | ForEach-Object { $_.Trim().ToLowerInvariant() })
+    if($targetNames.Count -eq 0 -or @($candidateNames|Where-Object { $targetNames -contains $_ }).Count -eq 0){return 'SAN/DNS identity does not match current BC certificate'}
+    $serverAuth=@($Certificate.EnhancedKeyUsageList|Where-Object{[string]$_.ObjectId.Value -eq '1.3.6.1.5.5.7.3.1' -or [string]$_.FriendlyName -eq 'Server Authentication'})
+    if($serverAuth.Count -eq 0){return 'Server Authentication EKU missing'}
+    if($Certificate.NotAfter -lt (Get-Date)){return 'PFX certificate is expired'}
+    if($Certificate.NotAfter -le $CurrentCertificate.NotAfter){return 'PFX certificate is not newer than current certificate'}
+    return $null
+}
+
+function Select-PfxCandidate {
+    param(
+        [object[]]$Candidates,
+        [securestring]$Password,
+        [object]$CurrentCertificate
+    )
+    $valid=@();$rejected=@()
+    foreach($file in @($Candidates)){
+        try{
+            $data=Get-PfxData -FilePath $file.FullName -Password $Password -ErrorAction Stop
+            $certificate=$data.EndEntityCertificates|Select-Object -First 1
+            $reason=Test-PfxCandidate $certificate $CurrentCertificate
+            if($null -eq $reason){$valid+=[pscustomobject]@{File=$file;Data=$data;Certificate=$certificate}}
+            else{$rejected+=[pscustomobject]@{Name=$file.Name;Reason=$reason}}
+        }catch{$rejected+=[pscustomobject]@{Name=$file.Name;Reason='PFX unreadable or password invalid'}}
+    }
+    foreach($item in @($rejected)){Write-Warning ("PFX scartato: {0} ({1})" -f $item.Name,$item.Reason)}
+    $selected=$valid|Sort-Object @{Expression={$_.Certificate.NotAfter};Descending=$true},@{Expression={$_.Certificate.Thumbprint};Descending=$false},@{Expression={$_.File.Name};Descending=$false}|Select-Object -First 1
+    return [pscustomobject]@{Selected=$selected;Valid=@($valid);Rejected=@($rejected)}
+}
 # ============================================================
 # Helper: customer context
 # ============================================================
@@ -1323,10 +1367,10 @@ function Main {
 
         # ---- Step 4: Find PFX ----
         Write-Host "[4] Verifica PFX disponibile..."
-        $pfxFile = Get-PfxFile -Path $pfxPath
+        $pfxCandidates = @(Get-PfxCandidates -Path $pfxPath)
 
         # Case 1: No PFX found
-        if ([string]::IsNullOrWhiteSpace($pfxFile)) {
+        if ($pfxCandidates.Count -eq 0) {
             Write-Warning "Nessun file PFX trovato in $pfxPath"
             $null = Send-CustomerNotification -Title "CERTAMENT - Certificato in scadenza" `
                 -Message ("Il certificato **$($certDetails.Subject)** e' **$expiryLabel**.`nCaricare un nuovo PFX sul server **$hostname** in: **$pfxPath**`nIncludere anche un file **password.txt** con la password del PFX nella stessa cartella.") `
@@ -1335,9 +1379,6 @@ function Main {
             $hadPipelineErrors = $true
             continue
         }
-
-        # Case 2: Read PFX
-        Write-Host "PFX trovato: $pfxFile. Lettura..."
 
         # --- Resolve PFX password: password.txt > config fallback ---
         $pfxPasswordPlain = $null
@@ -1360,43 +1401,20 @@ function Main {
             continue
         }
 
-        try {
-            $pfxPassword = ConvertTo-SecureString $pfxPasswordPlain -AsPlainText -Force
-            $pfxData = Get-PfxData -FilePath $pfxFile -Password $pfxPassword
-            $pfxExpiry = $pfxData.EndEntityCertificates.NotAfter
-            $pfxThumb  = $pfxData.EndEntityCertificates.Thumbprint
-        }
-        catch {
-            Write-Warning "Errore lettura PFX: $($_.Exception.Message)"
+        $pfxPassword = ConvertTo-SecureString $pfxPasswordPlain -AsPlainText -Force
+        $selection=Select-PfxCandidate -Candidates $pfxCandidates -Password $pfxPassword -CurrentCertificate $certDetails
+        $selected=$selection.Selected
+        if($null -eq $selected){
+            Write-Warning "Nessun PFX valido e pertinente trovato in $pfxPath"
             $null = Send-CustomerNotification -Title "CERTAMENT - Certificato in scadenza" `
-                -Message ("Il certificato **$($certDetails.Subject)** e' **$expiryLabel** ma il PFX non e' leggibile.`nVerificare che la password sia corretta.`nCaricare un nuovo PFX su **$hostname** in: **$pfxPath**`nIncludere anche un file **password.txt** con la password del PFX nella stessa cartella.") `
-                -ContextLabel "Certificato in scadenza - PFX non leggibile"
-            Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxUnreadable" -Detail $_.Exception.Message | Out-Null
+                -Message ("Il certificato **$($certDetails.Subject)** e' **$expiryLabel** ma nessun PFX e' leggibile, piu' recente e pertinente.`nVerificare password, SAN, EKU Server Authentication e validita'.") `
+                -ContextLabel "Certificato scaduto - PFX non valido"
+            Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxInvalid" -Detail "Nessun PFX valido e pertinente" | Out-Null
             $hadPipelineErrors = $true
             continue
         }
-
-        # Case 3a: PFX cert already expired
-        if ($pfxExpiry -lt (Get-Date)) {
-            Write-Warning "Il PFX contiene un certificato gia' scaduto ($pfxExpiry). Non verra' installato."
-            $null = Send-CustomerNotification -Title "CERTAMENT - PFX scaduto" `
-                -Message ("Il certificato **$($certDetails.Subject)** e' $expiryLabel.`nIl PFX trovato in **$pfxPath** contiene a sua volta un certificato **gia' scaduto** ($pfxExpiry).`nCaricare un PFX con un certificato valido.`nIncludere anche un file **password.txt** con la password del PFX nella stessa cartella.") `
-                -ContextLabel "Certificato scaduto - PFX scaduto"
-            Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxExpired" -Detail "PFX trovato ma certificato gia' scaduto: $pfxExpiry" | Out-Null
-            $hadPipelineErrors = $true
-            continue
-        }
-
-        # Case 3b: PFX not newer
-        if ($pfxExpiry -le $certDetails.NotAfter -or $pfxThumb -eq $oldThumb) {
-            Write-Warning "Il PFX non e' piu recente del certificato attuale."
-            $null = Send-CustomerNotification -Title "CERTAMENT - PFX non aggiornato" `
-                -Message ("Il certificato **$($certDetails.Subject)** e' $expiryLabel.`nIl PFX presente in **$pfxPath** non contiene un certificato piu recente.`nCaricare un nuovo PFX aggiornato.`nIncludere anche un file **password.txt** con la password del PFX nella stessa cartella.") `
-                -ContextLabel "Certificato scaduto - PFX non aggiornato"
-            Invoke-Heartbeat -Status "AwaitingPfx" -Stage "PfxNotNewer" -Detail "PFX presente ma non piu recente del certificato attuale" | Out-Null
-            $hadPipelineErrors = $true
-            continue
-        }
+        $pfxFile=$selected.File.FullName;$pfxData=$selected.Data;$pfxExpiry=$selected.Certificate.NotAfter;$pfxThumb=$selected.Certificate.Thumbprint
+        Write-Host ("PFX selezionato: {0} (NotAfter={1}, Thumbprint={2})" -f $pfxFile,$pfxExpiry,$pfxThumb)
 
         # ---- Step 5: Install PFX ----
         Write-Host "[5] Installazione nuovo certificato..."
@@ -1673,7 +1691,6 @@ Nuovo certificato installato $certStatusLabel su server **$hostname**.
     else {
         Invoke-Heartbeat -Status "Completed" -Stage "MainEnd" -Detail "Pipeline completata con successo" | Out-Null
     }
-
     if ($hadPipelineErrors) {
         Write-Warning "CERTAMENT completato con warning/errori. Verificare i log."
         Exit-WithCode 1

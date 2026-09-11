@@ -19,4 +19,18 @@
     return $pfxFiles[0].FullName
 }
 
-Export-ModuleMember -Function Get-PfxFile
+function Get-PfxCandidates {
+    [CmdletBinding()]
+    param(
+        [string]$Path = "C:\Certs"
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        Write-Error "Directory non trovata: $Path"
+        return @()
+    }
+
+    return @(Get-ChildItem -LiteralPath $Path -Filter '*.pfx' -File | Sort-Object Name)
+}
+
+Export-ModuleMember -Function Get-PfxFile, Get-PfxCandidates
