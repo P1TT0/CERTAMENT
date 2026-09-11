@@ -102,6 +102,13 @@ Ultima verifica runtime sulla VM:
 - baseline ripristinata in ogni scenario;
 - `RestoreDrift` vuoto in ogni scenario.
 
+Revisione wildcard e conflitti endpoint:
+
+- wildcard TLS a una sola label verificato con `EndpointWildcard` e `FastTest`;
+- `*.example.com` accetta `bc.example.com` ma non `foo.bc.example.com`;
+- conflitto tra `ExpectedDnsNames` e `HostHeader` rifiutato fail-closed;
+- failure injection su aggiornamenti parziali e rollback forzato restano il prossimo scope di test.
+
 ## Artefatti
 
 I run vengono salvati sotto `C:\ProgramData\EOS\Certament\ScenarioRunnerV8\runs\...` con baseline, prepared, post-run, post-restore, drift, log CERTAMENT e log netsh.
