@@ -19,3 +19,4 @@
 - **MultiGroup** — `PROD_NUP` e `PROD_NUP2` condividono lo stesso vecchio LAB; atteso rinnovo di entrambe.
 - **RestartPolicy** — come HappyPath ma `IIS.RestartAfterUpdate=false`; atteso aggiornamento senza `iisreset`.
 - **EndpointIdentityConfigured** — certificato corrente con SAN legacy ma `IIS.ExpectedDnsNames` configurato; il PFX con SAN endpoint corretto deve essere accettato.
+- **EndpointWildcard** — `IIS.ExpectedDnsNames=*.cert.pitto`; `bc.cert.pitto` deve essere accettato, mentre hostname con più label non deve essere considerato equivalente.

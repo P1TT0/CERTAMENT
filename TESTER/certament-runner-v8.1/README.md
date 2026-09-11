@@ -65,6 +65,8 @@ Provisioning automatico e reversibile di uno scenario, senza eseguire CERTAMENT:
 
 La validazione SAN usa `IIS.ExpectedDnsNames` se configurato, altrimenti l'hostname del binding HTTPS IIS. Se entrambi sono assenti, CERTAMENT rifiuta il PFX in modo fail-closed invece di usare il certificato precedente come autorita' DNS.
 
+Se `IIS.ExpectedDnsNames` e `HostHeader` sono entrambi presenti ma non coerenti, CERTAMENT considera la configurazione invalida e rifiuta il rinnovo; `ExpectedDnsNames` resta la source of truth e `HostHeader` e' un controllo diagnostico. I wildcard seguono la semantica TLS a una sola label: `*.example.com` copre `bc.example.com`, non `foo.bc.example.com`.
+
 Le prove di failure injection durante aggiornamenti parziali (BC aggiornato + IIS failure, IIS aggiornato + HTTP.sys failure, snapshot failure, archive failure e conflitti di binding/permessi) sono pianificate ma non vengono simulate artificialmente dalla V8.1 corrente. Restano criteri futuri con rollback obbligatorio.
 
 Recovery:

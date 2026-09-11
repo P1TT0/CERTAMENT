@@ -284,8 +284,8 @@ function Get-CertificateDnsNames {
 
 function Get-ConfiguredEndpointDnsNames {
     param([string]$SiteName,[string]$BindingInformation)
-    $configured=@()
-    if($config.IIS -and $config.IIS.ExpectedDnsNames){$configured+=@($config.IIS.ExpectedDnsNames)}
+    $configured=@();$configuredExpected=@()
+    if($config.IIS -and $config.IIS.PSObject.Properties['ExpectedDnsNames']){$configuredExpected+=@($config.IIS.ExpectedDnsNames);$configured+=@($configuredExpected)}
     try {
         Import-Module WebAdministration -ErrorAction Stop
         $binding=Get-WebBinding -Name $SiteName -Protocol 'https' -ErrorAction Stop|Where-Object{[string]$_.BindingInformation -eq $BindingInformation}|Select-Object -First 1
@@ -296,7 +296,10 @@ function Get-ConfiguredEndpointDnsNames {
         $value=([string]$name -replace '\s+','').Trim().ToLowerInvariant()
         if(-not [string]::IsNullOrWhiteSpace($value)){$normalized+=$value}
     }
-    return @($normalized|Sort-Object -Unique)
+    $expected=@($configuredExpected|ForEach-Object{([string]$_).Trim().ToLowerInvariant()}|Where-Object{-not [string]::IsNullOrWhiteSpace($_)}|Sort-Object -Unique)
+    $hostHeaders=@($normalized|Where-Object{$_ -notin $expected})
+    $conflict=($expected.Count -gt 0 -and $hostHeaders.Count -gt 0 -and -not (Test-DnsIdentityMatch -ExpectedNames $expected -CandidateNames $hostHeaders))
+    return [pscustomobject]@{ExpectedNames=$expected;HostHeaders=$hostHeaders;Names=@($expected);Conflict=$conflict}
 }
 
 function Test-DnsIdentityMatch {
@@ -304,11 +307,18 @@ function Test-DnsIdentityMatch {
     foreach($expected in @($ExpectedNames)){
         foreach($candidate in @($CandidateNames)){
             if($expected -eq $candidate){return $true}
-            if($expected.StartsWith('*.') -and $candidate -like ('*.'+$expected.Substring(2))){return $true}
-            if($candidate.StartsWith('*.') -and $expected -like ('*.'+$candidate.Substring(2))){return $true}
+            if($expected.StartsWith('*.') -and (Test-WildcardDnsMatch $expected $candidate)){return $true}
+            if($candidate.StartsWith('*.') -and (Test-WildcardDnsMatch $candidate $expected)){return $true}
         }
     }
     return $false
+}
+
+function Test-WildcardDnsMatch {
+    param([string]$Wildcard,[string]$Name)
+    $suffix=$Wildcard.Substring(2)
+    if([string]::IsNullOrWhiteSpace($suffix) -or $Name -notlike ('*.'+$suffix)){return $false}
+    return (($Name.Length - $suffix.Length - 1) -gt 0 -and ([string]$Name.Substring(0,$Name.Length-$suffix.Length-1) -notmatch '\.'))
 }
 
 function Test-PfxCandidate {
@@ -1433,7 +1443,9 @@ function Main {
         }
 
         $pfxPassword = ConvertTo-SecureString $pfxPasswordPlain -AsPlainText -Force
-        $expectedDnsNames=@(Get-ConfiguredEndpointDnsNames -SiteName $iisSiteName -BindingInformation '*:443:')
+        $endpointIdentity=Get-ConfiguredEndpointDnsNames -SiteName $iisSiteName -BindingInformation '*:443:'
+        if($endpointIdentity.Conflict){throw 'Configurazione endpoint DNS incoerente: IIS.ExpectedDnsNames e HostHeader non coincidono.'}
+        $expectedDnsNames=@($endpointIdentity.Names)
         Write-Host ("Identita' DNS endpoint configurata: {0}" -f ($(if($expectedDnsNames.Count -gt 0){$expectedDnsNames -join ', '}else{'nessuna'})))
         $selection=Select-PfxCandidate -Candidates $pfxCandidates -Password $pfxPassword -CurrentCertificate $certDetails -ExpectedDnsNames $expectedDnsNames
         $selected=$selection.Selected
