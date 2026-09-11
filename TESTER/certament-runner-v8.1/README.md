@@ -111,6 +111,8 @@ Revisione wildcard e conflitti endpoint:
 
 La pipeline runtime ora interrompe il gruppo dopo errori BC/SSL/URLACL, richiede la persistenza dello snapshot prima dell'update BC, non archivia il PFX ne' elimina `password.txt` dopo errori e mantiene le verifiche IIS scoped ai binding del certificate-group. Il test dedicato con due binding IIS appartenenti a certificati diversi e le failure injection controllate BC/IIS/HTTP.sys/archive restano da implementare.
 
+Revisione transazionale corrente: Core 10/10 PASS e Renewal 5/5 PASS, con baseline ripristinata e `RestoreDrift` vuoto in tutti gli scenari verificati. Il commit strutturale e' `235d399`.
+
 ## Artefatti
 
 I run vengono salvati sotto `C:\ProgramData\EOS\Certament\ScenarioRunnerV8\runs\...` con baseline, prepared, post-run, post-restore, drift, log CERTAMENT e log netsh.
