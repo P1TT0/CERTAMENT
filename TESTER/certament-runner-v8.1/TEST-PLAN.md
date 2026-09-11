@@ -13,6 +13,10 @@
 11. `MultiGroup` controlla anche esplicitamente `PROD_NUP` oltre al target `PROD_NUP2`.
 12. `RestartPolicy` verifica che l'output non contenga il riavvio IIS quando la policy e' disabilitata.
 
+## Failure injection fuori scope V8.1
+
+Sono pianificati scenari dedicati per BC aggiornato + IIS failure, IIS aggiornato + HTTP.sys failure, snapshot failure, archive failure e conflitti di binding/permessi. Non sono ancora implementati; quando verranno aggiunti dovranno verificare rollback e `RestoreDrift` prima di classificare il risultato.
+
 ## Limite dichiarato
 
 La sandbox corrente non può eseguire realmente Windows PowerShell 5.1, IIS e Business Central. Il runtime finale deve essere eseguito sulla VM; il runner è progettato affinché eventuali errori siano osservabili nei log e, soprattutto, affinché il restore fallito porti a `FAIL` invece di mascherare il problema.

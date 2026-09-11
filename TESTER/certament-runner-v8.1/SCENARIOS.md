@@ -2,7 +2,7 @@
 
 ## Core
 
-- **NoOp** — prepara BC, IIS e HTTP.sys con un certificato LAB gia valido e corrente; atteso nessun cambiamento dopo l'avvio di CERTAMENT.
+- **NoOp** — prepara BC, IIS e HTTP.sys con un certificato LAB gia valido e corrente, esegue il vero CERTAMENT sullo stato LAB e verifica nessun cambiamento.
 - **PfxMissing** — certificato BC in scadenza, nessun PFX; atteso rifiuto senza modifiche runtime.
 - **WrongPassword** — PFX valido ma password errata; atteso rifiuto senza modifiche runtime.
 - **PfxExpired** — PFX leggibile ma certificato già scaduto; atteso rifiuto senza installazione.

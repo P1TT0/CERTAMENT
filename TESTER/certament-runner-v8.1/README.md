@@ -8,7 +8,7 @@ Runner leggero per Windows PowerShell 5.1 che esegue il vero `C:\CERTAMENT\_MAIN
 - Salva il `config.json` reale in un backup DPAPI legato all'utente Windows che avvia il run e lo ripristina byte-per-byte.
 - Usa una directory PFX isolata per ogni scenario e il vero meccanismo CERTAMENT `password.txt`.
 - Acquisisce baseline di BC, IIS, HTTP.sys, URLACL, certificate store, PFX e Scheduled Task.
-- Anche lo scenario `NoOp` usa una preparazione LAB isolata e non esegue CERTAMENT sullo stato reale.
+- Anche lo scenario `NoOp` usa una preparazione LAB isolata, esegue il vero CERTAMENT su quello stato e non modifica lo stato reale della VM.
 - Prepara BC target, IIS 443 e i binding HTTP.sys pertinenti in modo coerente prima del rinnovo.
 - Esegue il vero `_MAINCertManager.ps1` come processo Windows PowerShell 5.1 separato, con timeout e log stdout/stderr.
 - Verifica post-condizioni reali, non solo l'exit code.
@@ -62,6 +62,8 @@ Provisioning automatico e reversibile di uno scenario, senza eseguire CERTAMENT:
 ```
 
 `Provision` crea certificati e PFX LAB nella directory del run, prepara temporaneamente BC, IIS e HTTP.sys, salva gli snapshot e ripristina subito la baseline. `Run` esegue lo stesso provisioning automaticamente prima del vero CERTAMENT. Il runner non installa Business Central o IIS da zero: questi componenti devono esistere nella VM, mentre la preparazione dei dati e dello stato necessari agli scenari e' automatica.
+
+Le prove di failure injection durante aggiornamenti parziali (BC aggiornato + IIS failure, IIS aggiornato + HTTP.sys failure, snapshot failure, archive failure e conflitti di binding/permessi) sono pianificate ma non vengono simulate artificialmente dalla V8.1 corrente. Restano criteri futuri con rollback obbligatorio.
 
 Recovery:
 

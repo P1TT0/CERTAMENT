@@ -24,9 +24,10 @@ $StateRoot     = 'C:\ProgramData\EOS\Certament\ScenarioRunnerV8'
 $RunRoot       = Join-Path $StateRoot 'runs'
 $script:BCReady = $false
 $script:NavTool = $null
+$script:LabThumbprints = @{}
 
 $ScenarioCatalog = [ordered]@{
-    NoOp               = 'Esegue CERTAMENT nello stato reale; atteso: nessuna modifica.'
+    NoOp               = 'Prepara uno stato LAB valido e corrente; CERTAMENT deve eseguire un no-op senza modifiche.'
     PfxMissing         = 'Certificato BC in scadenza, PFX assente; atteso: nessuna modifica.'
     WrongPassword      = 'PFX valido ma password errata; atteso: nessuna modifica.'
     PfxExpired         = 'PFX contiene certificato gia scaduto; atteso: nessuna modifica.'
@@ -239,7 +240,16 @@ function Reconcile-UrlAcl($before,[string]$logPath){
     }
 }
 
-function Get-CertState {return @(Get-ChildItem 'Cert:\LocalMachine\My' -ErrorAction Stop|ForEach-Object{[pscustomobject]@{Thumbprint=Normalize-Thumb $_.Thumbprint;Subject=[string]$_.Subject;FriendlyName=[string]$_.FriendlyName;HasPrivateKey=[bool]$_.HasPrivateKey;NotAfter=$_.NotAfter.ToString('o')}})}
+function Get-CertState {
+    return @(Get-ChildItem 'Cert:\LocalMachine\My' -ErrorAction Stop|ForEach-Object{
+        $cert=$_;$dns=@();$eku=@()
+        foreach($extension in @($cert.Extensions)){
+            if([string]$extension.Oid.Value -eq '2.5.29.17'){$dns+=@([regex]::Matches($extension.Format($false),'DNS Name=([^,\r\n]+)')|ForEach-Object{$_.Groups[1].Value.Trim()})}
+            if([string]$extension.Oid.Value -eq '2.5.29.37'){$eku+=@([regex]::Matches($extension.Format($false),'([0-9]+(?:\.[0-9]+)+)')|ForEach-Object{$_.Groups[1].Value})}
+        }
+        [pscustomobject]@{Thumbprint=Normalize-Thumb $cert.Thumbprint;Subject=[string]$cert.Subject;FriendlyName=[string]$cert.FriendlyName;HasPrivateKey=[bool]$cert.HasPrivateKey;NotBefore=$cert.NotBefore.ToString('o');NotAfter=$cert.NotAfter.ToString('o');DnsNames=@($dns|Sort-Object -Unique);EkuOids=@($eku|Sort-Object -Unique);HasServerAuthentication=(@($eku|Where-Object{$_ -eq '1.3.6.1.5.5.7.3.1'}).Count -gt 0)}
+    })
+}
 function Get-PfxState([string]$path=$null){if([string]::IsNullOrWhiteSpace($path)){$cfg=Get-ConfigObject;$path=[string]$cfg.Pfx.Path};if(-not(Test-Path -LiteralPath $path -PathType Container)){return @()};return @(Get-ChildItem -LiteralPath $path -Filter '*.pfx' -File -ErrorAction SilentlyContinue|ForEach-Object{[pscustomobject]@{Name=$_.Name;Length=[int64]$_.Length;SHA256=(Hash-File $_.FullName);LastWriteTime=$_.LastWriteTime.ToString('o')}})}
 function Get-TaskState {$t=Get-ScheduledTask -TaskName 'CERTAMENT' -ErrorAction SilentlyContinue;if($null -eq $t){return $null};return [pscustomobject]@{Name=[string]$t.TaskName;State=[string]$t.State;Enabled=[bool]$t.Settings.Enabled}}
 function Get-IISProcessEvidence {$rows=@();foreach($p in @(Get-Process w3wp -ErrorAction SilentlyContinue)){$st=$null;try{$st=$p.StartTime.ToString('o')}catch{};$rows+=[pscustomobject]@{Id=[int]$p.Id;StartTime=$st}};return @($rows|Sort-Object Id)}
@@ -266,12 +276,13 @@ function New-LabCert([string]$name,[string[]]$dns,[double]$validDays,[securestri
     if($validDays -lt 0){$notBefore=$now.AddDays(-2);$notAfter=$now.AddDays(-1)}else{$notBefore=$now.AddMinutes(-10);$notAfter=$now.AddDays($validDays)}
     $cert=New-SelfSignedCertificate -Type SSLServerAuthentication -Subject ('CN='+$dns[0]) -DnsName $dns -CertStoreLocation 'Cert:\LocalMachine\My' -FriendlyName $name -NotBefore $notBefore -NotAfter $notAfter -KeyExportPolicy Exportable -ErrorAction Stop
     $pfx=Join-Path $pfxDir ($name+'.pfx');Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $password -Force -ErrorAction Stop|Out-Null
-    return [pscustomobject]@{Thumbprint=(Normalize-Thumb $cert.Thumbprint);PfxPath=$pfx;FriendlyName=$name;NotBefore=$cert.NotBefore;NotAfter=$cert.NotAfter;Subject=$cert.Subject;DnsNames=@($dns)}
+    $thumbprint=Normalize-Thumb $cert.Thumbprint;$script:LabThumbprints[$thumbprint]=$true
+    return [pscustomobject]@{Thumbprint=$thumbprint;PfxPath=$pfx;FriendlyName=$name;NotBefore=$cert.NotBefore;NotAfter=$cert.NotAfter;Subject=$cert.Subject;DnsNames=@($dns)}
 }
 function Remove-LabCerts {
-    $labs=@(Get-ChildItem 'Cert:\LocalMachine\My' -ErrorAction Stop|Where-Object{([string]$_.FriendlyName)-like 'CERTAMENT-LAB-*'})
+    $labs=@(Get-ChildItem 'Cert:\LocalMachine\My' -ErrorAction Stop|Where-Object{$script:LabThumbprints.ContainsKey((Normalize-Thumb $_.Thumbprint))})
     foreach($cert in $labs){Remove-Item ('Cert:\LocalMachine\My\'+$cert.Thumbprint) -Force -ErrorAction Stop}
-    $remaining=@(Get-ChildItem 'Cert:\LocalMachine\My' -ErrorAction Stop|Where-Object{([string]$_.FriendlyName)-like 'CERTAMENT-LAB-*'})
+    $remaining=@(Get-ChildItem 'Cert:\LocalMachine\My' -ErrorAction Stop|Where-Object{$script:LabThumbprints.ContainsKey((Normalize-Thumb $_.Thumbprint))})
     Assert-True ($remaining.Count -eq 0) 'Certificati CERTAMENT-LAB-* residui dopo cleanup.'
 }
 function Set-FileAge([string]$path,[datetime]$when){(Get-Item -LiteralPath $path).LastWriteTime=$when}
@@ -409,6 +420,35 @@ function Restore-IISSiteState($before){
         elseif([string]$site.State -eq 'Stopped' -and [string]$current.State -ne 'Stopped'){Stop-Website -Name ([string]$site.Name)}
     }
 }
+function Restore-IISBindings($before){
+    foreach($site in @($before.IIS)){
+        $siteName=[string]$site.Name
+        $baselineMap=@{}
+        foreach($binding in @($site.Bindings)){$baselineMap[([string]$binding.Protocol)+'|'+([string]$binding.BindingInformation)]=$binding}
+        $current=@(Get-WebBinding -Name $siteName -ErrorAction Stop)
+        foreach($binding in $current){
+            $key=([string]$binding.Protocol)+'|'+([string]$binding.BindingInformation)
+            if(-not $baselineMap.ContainsKey($key)){
+                Remove-WebBinding -Name $siteName -Protocol ([string]$binding.Protocol) -BindingInformation ([string]$binding.BindingInformation) -ErrorAction Stop
+            }
+        }
+        foreach($binding in @($site.Bindings)){
+            $protocol=[string]$binding.Protocol;$bindingInformation=[string]$binding.BindingInformation
+            $currentBinding=Get-WebBinding -Name $siteName -Protocol $protocol -ErrorAction SilentlyContinue|Where-Object{[string]$_.BindingInformation -eq $bindingInformation}|Select-Object -First 1
+            if($null -eq $currentBinding){
+                $newParams=@{Name=$siteName;Protocol=$protocol;BindingInformation=$bindingInformation;ErrorAction='Stop'}
+                if([int]$binding.SslFlags -gt 0){$newParams.SslFlags=[int]$binding.SslFlags}
+                New-WebBinding @newParams|Out-Null
+                $currentBinding=Get-WebBinding -Name $siteName -Protocol $protocol -ErrorAction Stop|Where-Object{[string]$_.BindingInformation -eq $bindingInformation}|Select-Object -First 1
+            }
+            Assert-True ($null -ne $currentBinding) "Binding IIS non ripristinabile: $siteName / $protocol / $bindingInformation"
+            if($protocol -eq 'https' -and -not [string]::IsNullOrWhiteSpace([string]$binding.CertificateHash)){
+                $store='My';if(-not [string]::IsNullOrWhiteSpace([string]$binding.CertificateStoreName)){$store=[string]$binding.CertificateStoreName}
+                $currentBinding.AddSslCertificate((Normalize-Thumb $binding.CertificateHash),$store)|Out-Null
+            }
+        }
+    }
+}
 function Restore-State($before,[string]$runDir){
     $cfgBackup=Join-Path $runDir 'config.backup.dpapi';Assert-True (Test-Path -LiteralPath $cfgBackup) 'Backup config DPAPI non trovato.'
     Info 'Restore: config'
@@ -423,9 +463,7 @@ function Restore-State($before,[string]$runDir){
     Info 'Restore: HTTP.sys'
     Restore-HttpSsl $before $runDir
     Info 'Restore: IIS'
-    foreach($site in @($before.IIS)){
-        foreach($b in @($site.Bindings|Where-Object Protocol -eq 'https')){if($b.CertificateHash){$store='My';if(-not [string]::IsNullOrWhiteSpace([string]$b.CertificateStoreName)){$store=[string]$b.CertificateStoreName};Ensure-IISBinding $site.Name $b.BindingInformation $b.CertificateHash $store}}
-    }
+    Restore-IISBindings $before
     Restore-IISSiteState $before
     Info 'Restore: URLACL e certificati LAB'
     Reconcile-UrlAcl $before (Join-Path $runDir 'urlacl-restore.log')
@@ -475,20 +513,14 @@ function Evaluate-Scenario($name,$exec,$before,$preparedState,$after,$prep){
     return 'FAIL'
 }
 function Run-One([string]$name){
-    Ensure-Dirs;Initialize-Platform;Assert-True ($ScenarioCatalog.Contains($name)) "Scenario non supportato: $name"
+    $script:LabThumbprints=@{};Ensure-Dirs;Initialize-Platform;Assert-True ($ScenarioCatalog.Contains($name)) "Scenario non supportato: $name"
     $runDir=Join-Path $RunRoot ((Get-Date -Format 'yyyyMMdd_HHmmssfff')+'_'+$name);New-Item -ItemType Directory -Path $runDir -Force|Out-Null;Info "Scenario $name -> $runDir"
     $before=$null;$prepared=$null;$after=$null;$final=$null;$prepInfo=$null;$exec=[pscustomobject]@{ExitCode=0;TimedOut=$false;Duration=0};$result='FAIL';$err='';$runtimeDrift=@();$restoreDrift=@()
     try{
         Assert-True (@(Get-ChildItem 'Cert:\LocalMachine\My' -ErrorAction Stop|Where-Object{([string]$_.FriendlyName)-like 'CERTAMENT-LAB-*'}).Count -eq 0) 'Esistono gia certificati CERTAMENT-LAB-*; eseguire Recover/cleanup prima.'
         $before=New-Snapshot;Save-SnapshotArtifacts $before $runDir 'baseline' $true
-        if($name -eq 'NoOp'){
-            $prepInfo=[pscustomobject]@{RunDir=$runDir;Site=(Get-ConfiguredIISSite);Target=$TargetInstance;LabPfxDir='';OldIisThumb='';OldTargetThumb='';Old=$null;New=$null;Bad=$null;ModifiedHttp=@()}
-            $prepared=$before
-            Save-Json (Get-PublicPreparation $prepInfo $runDir) (Join-Path $runDir 'prepared.json')
-        }else{
-            $prepInfo=Prepare-Scenario $name $runDir $before;$prepared=New-Snapshot;Save-SnapshotArtifacts $prepared $runDir 'prepared'
-            Save-Json (Get-PublicPreparation $prepInfo $runDir) (Join-Path $runDir 'prepared.json')
-        }
+        $prepInfo=Prepare-Scenario $name $runDir $before;$prepared=New-Snapshot;Save-SnapshotArtifacts $prepared $runDir 'prepared'
+        Save-Json (Get-PublicPreparation $prepInfo $runDir) (Join-Path $runDir 'prepared.json')
         $exec=Invoke-Certament $runDir
         $after=New-Snapshot;Save-SnapshotArtifacts $after $runDir 'post-run';$runtimeDrift=@(Get-Drift $prepared $after);Save-Json $runtimeDrift (Join-Path $runDir 'runtime-drift.json')
         $result=Evaluate-Scenario $name $exec $before $prepared $after $prepInfo
@@ -505,13 +537,13 @@ function Run-One([string]$name){
     Save-Json $r (Join-Path $runDir 'result.json');if($result -eq 'PASS'){Ok "$name PASS"}elseif($result -eq 'EXPECTED-GAP'){Warn "$name EXPECTED-GAP"}else{Fail "$name FAIL"};return $r
 }
 function Provision-One([string]$name){
-    Ensure-Dirs;Initialize-Platform;Assert-True ($ScenarioCatalog.Contains($name)) "Scenario non supportato: $name"
+    $script:LabThumbprints=@{};Ensure-Dirs;Initialize-Platform;Assert-True ($ScenarioCatalog.Contains($name)) "Scenario non supportato: $name"
     $runDir=Join-Path $RunRoot ((Get-Date -Format 'yyyyMMdd_HHmmssfff')+'_PROVISION_'+$name);New-Item -ItemType Directory -Path $runDir -Force|Out-Null;Info "Provision $name -> $runDir"
     $before=$null;$prepared=$null;$prepInfo=$null;$err='';$restoreDrift=@();$result='FAIL'
     try{
         Assert-True (@(Get-ChildItem 'Cert:\LocalMachine\My' -ErrorAction Stop|Where-Object{([string]$_.FriendlyName)-like 'CERTAMENT-LAB-*'}).Count -eq 0) 'Esistono gia certificati CERTAMENT-LAB-*; eseguire Recover/cleanup prima.'
         $before=New-Snapshot;Save-SnapshotArtifacts $before $runDir 'baseline' $true
-        if($name -eq 'NoOp'){$prepInfo=[pscustomobject]@{RunDir=$runDir;Site=(Get-ConfiguredIISSite);Target=$TargetInstance;LabPfxDir='';OldIisThumb='';OldTargetThumb='';Old=$null;New=$null;Bad=$null;ModifiedHttp=@()};$prepared=$before}else{$prepInfo=Prepare-Scenario $name $runDir $before;$prepared=New-Snapshot;Save-SnapshotArtifacts $prepared $runDir 'prepared'}
+        $prepInfo=Prepare-Scenario $name $runDir $before;$prepared=New-Snapshot;Save-SnapshotArtifacts $prepared $runDir 'prepared'
         Save-Json (Get-PublicPreparation $prepInfo $runDir) (Join-Path $runDir 'prepared.json')
         $result='PASS'
     }catch{$err=$_.Exception.ToString();$result='FAIL'}finally{
