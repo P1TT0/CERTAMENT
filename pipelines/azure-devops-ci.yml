@@ -94,6 +94,17 @@ stages:
                 }
 
           - task: PowerShell@2
+            displayName: Run fast CERTAMENT tester checks
+            inputs:
+              targetType: inline
+              pwsh: false
+              script: |
+                & "$(Build.SourcesDirectory)\TESTER\certament-runner-v8.1\CertamentScenarioRunner.ps1" -Action FastTest
+                if ($LASTEXITCODE -ne 0) {
+                  throw 'Fast CERTAMENT tester checks failed.'
+                }
+
+          - task: PowerShell@2
             displayName: Run Pester tests if present
             inputs:
               targetType: inline

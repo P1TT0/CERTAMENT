@@ -14,6 +14,18 @@
 #>
 
 # --- Require Administrator ---
+function Get-TestSleepSeconds {
+    param([int]$Seconds)
+    $scale = 1.0
+    if (-not [string]::IsNullOrWhiteSpace($env:CERTAMENT_TEST_SLEEP_SCALE)) {
+        $parsed = 0.0
+        if ([double]::TryParse($env:CERTAMENT_TEST_SLEEP_SCALE, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$parsed)) {
+            $scale = [math]::Max(0.0, [math]::Min(1.0, $parsed))
+        }
+    }
+    return [int][math]::Ceiling($Seconds * $scale)
+}
+
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Warning "CERTAMENT richiede privilegi di Amministratore. Rilancio..."
     Start-Process powershell "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
@@ -1439,14 +1451,14 @@ function Main {
 
         # --- Post-BC verification with auto-remediation ---
         Write-Host "`nVerifica post-aggiornamento BC (attesa avvio servizi)..."
-        Start-Sleep -Seconds 15
+        Start-Sleep -Seconds (Get-TestSleepSeconds 15)
         $bcVerifyErrors = Test-BCPostUpdate -ExpectedThumbprint $newThumb -OldThumbprint $oldThumb
         if ($bcVerifyErrors) {
             Write-Warning "Verifica BC fallita: $($bcVerifyErrors -join '; ')"
             Write-Host "Retry aggiornamento BC..."
             $bcRetry = Update-BCServiceCert -NewThumbprint $newThumb -OldThumbprint $oldThumb
             if ($bcRetry) { $bcRetry | Format-Table -AutoSize }
-            Start-Sleep -Seconds 15
+            Start-Sleep -Seconds (Get-TestSleepSeconds 15)
             $bcVerifyErrors2 = Test-BCPostUpdate -ExpectedThumbprint $newThumb -OldThumbprint $oldThumb
             if ($bcVerifyErrors2) {
                 $errDetail = $bcVerifyErrors2 -join "; "
@@ -1571,7 +1583,7 @@ function Main {
             catch {
                 Write-Warning "Retry IIS fallito: $($_.Exception.Message)"
             }
-            Start-Sleep -Seconds 10
+            Start-Sleep -Seconds (Get-TestSleepSeconds 10)
             $iisVerifyErrors2 = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName
             if ($iisVerifyErrors2) {
                 # Last resort: repair from snapshot (recreates missing bindings)
@@ -1586,7 +1598,7 @@ function Main {
                     Write-Host "Repair IIS: corretti/ricreati $($repairSuccess.Count) binding."
                     # Restart IIS after repair to ensure bindings are active
                     try { iisreset /noforce | Out-Null; Write-Host "IIS riavviato dopo repair." } catch { Write-Warning "iisreset fallito: $($_.Exception.Message)" }
-                    Start-Sleep -Seconds 5
+                    Start-Sleep -Seconds (Get-TestSleepSeconds 5)
 
                     # Final verification after repair
                     $iisVerifyErrors3 = Test-IISPostUpdate -ExpectedThumbprint $newThumb -SiteName $iisSiteName

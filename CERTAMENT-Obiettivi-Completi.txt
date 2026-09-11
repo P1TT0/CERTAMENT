@@ -1,0 +1,438 @@
+CERTAMENT — RIASSUNTO COMPLETO DEGLI OBIETTIVI DEL PROGETTO
+================================================================
+
+1. SCOPO PRINCIPALE
+-------------------
+CERTAMENT è un'automazione per la gestione del ciclo di vita dei certificati TLS
+negli ambienti Microsoft Dynamics 365 Business Central on-premises.
+
+Obiettivo principale:
+- individuare in modo automatico i certificati BC in uso;
+- determinare quando un certificato richiede rinnovo;
+- trovare il PFX corretto;
+- importare il nuovo certificato;
+- aggiornare Business Central;
+- aggiornare IIS e i relativi binding HTTPS;
+- mantenere coerenti HTTP.sys/URLACL quando rilevanti;
+- verificare che il servizio sia tornato operativo;
+- notificare l'esito;
+- archiviare il materiale solo dopo un aggiornamento riuscito;
+- produrre un heartbeat/indicatore di esecuzione affidabile quando configurato.
+
+L'idea è sostituire una procedura manuale e ripetitiva con una procedura
+automatica, ripetibile, osservabile e adatta alla produzione.
+
+2. FLUSSO OPERATIVO ATTESO
+--------------------------
+Il flusso concettuale è:
+
+Scheduled Task
+    ->
+_MAINCertManager.ps1
+    ->
+lettura configurazione
+    ->
+controllo mutex / esclusione di esecuzioni concorrenti
+    ->
+scoperta modulo Business Central
+    ->
+scoperta istanze BC e certificati
+    ->
+raggruppamento delle istanze per certificato
+    ->
+valutazione scadenza
+    ->
+ricerca PFX
+    ->
+lettura/validazione PFX
+    ->
+snapshot dello stato
+    ->
+aggiornamento certificati BC
+    ->
+verifica BC
+    ->
+riparazione/aggiornamento SSL/IIS
+    ->
+verifica IIS/endpoints
+    ->
+notifica
+    ->
+archivio PFX
+    ->
+heartbeat
+
+La macchina non deve essere modificata prima che siano state raccolte
+informazioni sufficienti sullo stato corrente e sui target.
+
+3. BUSINESS CENTRAL
+-------------------
+CERTAMENT deve:
+- scoprire automaticamente le istanze Business Central;
+- usare il modulo BC corretto;
+- distinguere istanze attive da istanze disabilitate/non target;
+- leggere il certificato configurato per ogni istanza;
+- raggruppare le istanze che condividono lo stesso certificato;
+- gestire correttamente più gruppi contemporaneamente;
+- aggiornare solo le istanze che devono essere aggiornate;
+- mantenere invariati i server non interessati;
+- verificare che il nuovo thumbprint sia realmente configurato;
+- verificare che i servizi tornino nello stato atteso;
+- gestire errori parziali senza dichiarare un rinnovo riuscito quando solo
+  una parte del gruppo è stata aggiornata.
+
+La scoperta BC deve essere fail-closed:
+se la visibilità delle istanze/configurazioni è parziale o ambigua, non
+bisogna proseguire con operazioni distruttive.
+
+4. CERTIFICATI
+--------------
+Il certificato corretto non è semplicemente "un PFX che si apre".
+
+Il progetto deve tendere a verificare almeno:
+- thumbprint;
+- Subject;
+- SAN;
+- EKU / Server Authentication;
+- private key;
+- NotBefore;
+- NotAfter;
+- eventuali ulteriori proprietà necessarie al target.
+
+Il certificato scelto deve essere coerente con il target Business Central e
+non deve essere accettato solo perché possiede un thumbprint valido.
+
+5. SCELTA DEL PFX
+-----------------
+CERTAMENT deve individuare il PFX giusto tra i candidati disponibili.
+
+Obiettivi:
+- evitare di scegliere un PFX destinato a un altro cliente/ambiente;
+- evitare di scegliere un PFX più vecchio del certificato corrente;
+- gestire correttamente PFX multipli;
+- verificare che il file sia stabile/leggibile;
+- evitare di importare un PFX scaduto o non utilizzabile;
+- arrivare a una selezione deterministica e spiegabile.
+
+Il comportamento attuale basato sul candidato più recente per LastWriteTime è
+un punto da valutare con attenzione perché può essere insufficiente in un
+ambiente con più PFX.
+
+6. SICUREZZA DELLA PASSWORD PFX
+-------------------------------
+L'architettura dovrebbe evitare password PFX in chiaro quando possibile.
+
+Obiettivi:
+- non lasciare password in file o log non necessari;
+- preferire Credential Manager o meccanismi equivalenti;
+- evitare di esporre password nei report;
+- gestire correttamente una password errata senza eseguire modifiche parziali.
+
+7. SNAPSHOT E TRANSAZIONALITÀ
+-----------------------------
+Prima di operazioni distruttive CERTAMENT deve avere una fotografia
+sufficiente dello stato.
+
+Lo snapshot dovrebbe coprire almeno:
+- configurazione BC;
+- stato dei servizi BC;
+- certificati;
+- IIS;
+- binding HTTPS;
+- HTTP.sys SSL bindings;
+- URLACL;
+- eventuali proprietà correlate necessarie per il recovery.
+
+Obiettivo:
+avere una base affidabile per verificare il cambiamento e per recuperare
+lo stato precedente.
+
+Se lo snapshot fallisce o è incompleto:
+STOP.
+Non devono iniziare operazioni distruttive.
+
+8. AGGIORNAMENTO BC
+-------------------
+L'aggiornamento deve essere:
+- mirato;
+- completo per il gruppo target;
+- verificabile;
+- reversibile/recuperabile quando possibile.
+
+In caso di partial failure:
+- non bisogna passare automaticamente all'IIS;
+- non bisogna archiviare il PFX come successo;
+- bisogna segnalare chiaramente lo stato parziale;
+- bisogna tentare recovery secondo una strategia deterministica.
+
+9. IIS
+------
+CERTAMENT deve aggiornare IIS in modo strettamente mirato.
+
+Obiettivi:
+- identificare il sito corretto;
+- identificare il binding HTTPS corretto;
+- sostituire solo il certificato target;
+- non modificare altri siti;
+- non allargare un recovery a tutti i binding HTTPS;
+- verificare il thumbprint post-update;
+- verificare che il sito e gli endpoint siano raggiungibili.
+
+La riparazione non deve mai diventare:
+"trovi un conflitto -> sposta/rimuovi un binding di un altro sito".
+
+10. HTTP.SYS / SSL
+------------------
+Su BC on-prem possono esistere binding SSL HTTP.sys oltre ai binding IIS.
+
+CERTAMENT deve quindi:
+- conoscere i binding HTTP.sys rilevanti;
+- aggiornare solo quelli necessari;
+- conservare Application ID, endpoint e store quando richiesti;
+- verificare il binding dopo l'operazione;
+- non modificare binding unrelated.
+
+11. URLACL
+----------
+URLACL possono essere condivisi dall'ambiente e non tutti appartengono a
+CERTAMENT.
+
+Obiettivi:
+- preservare URLACL unrelated;
+- modificare solo quelli necessari;
+- poterli usare per recovery;
+- verificare che il set finale non contenga modifiche inattese.
+
+12. RESTART E READINESS
+----------------------
+Il progetto deve rispettare:
+    IIS.RestartAfterUpdate / RestartAfterUpdate
+
+Se il restart è disabilitato:
+- non bisogna forzare un restart.
+
+Se il restart è richiesto:
+- deve essere eseguito solo dove necessario.
+
+Inoltre:
+- preferire readiness polling a sleep fissi;
+- aspettare davvero che BC/IIS siano pronti;
+- verificare endpoint e servizi prima di dichiarare successo.
+
+13. VERIFICA POST-UPDATE
+------------------------
+Non basta:
+    processo terminato con exit code 0.
+
+Il successo deve essere dimostrato da post-condizioni reali:
+
+- BC target usa il nuovo certificato;
+- certificato presente;
+- private key presente;
+- validità corretta;
+- IIS target usa il nuovo certificato;
+- HTTP.sys target è corretto;
+- servizi BC sono nello stato atteso;
+- endpoint sono raggiungibili;
+- non risultano modifiche unrelated;
+- eventuale archive è stato eseguito correttamente;
+- eventuale heartbeat è stato eseguito secondo configurazione.
+
+14. NOTIFICHE
+------------
+CERTAMENT deve informare gli utenti/operatori quando:
+- un certificato sta per scadere;
+- un rinnovo viene eseguito;
+- il rinnovo fallisce;
+- il sistema rimane in stato parziale.
+
+Le notifiche non devono compromettere l'operazione principale:
+un errore di notifica non dovrebbe trasformare un rinnovo core riuscito in
+un falso failure operativo, ma deve essere tracciato.
+
+La configurazione reale include una sezione CertificateExpiry con
+NotifyBeforeDays e supporto alle notifiche. 
+
+15. HEARTBEAT / MONITORING
+--------------------------
+L'heartbeat serve a dimostrare che CERTAMENT sta effettivamente eseguendo.
+
+Obiettivi:
+- identità chiara dell'installazione;
+- autenticazione/identità robusta;
+- timeout;
+- distinzione tra execution success e heartbeat failure;
+- possibilità di capire quando il task è fermo o non esegue.
+
+Un semplice Scheduled Task "Ready" o LastResult 0 non è sufficiente come
+prova di salute del processo applicativo.
+
+16. SCHEDULED TASK
+------------------
+CERTAMENT deve essere eseguibile in modo affidabile da Scheduled Task.
+
+Obiettivi:
+- esecuzione con account corretto;
+- trigger corretto;
+- working directory corretta;
+- timeout realistico;
+- mutex contro esecuzioni contemporanee;
+- logging;
+- risultato verificabile.
+
+La VM reale utilizza un task CERTAMENT che esegue PowerShell con
+_MAINCertManager.ps1. 
+
+17. MUTEX / CONCORRENZA
+-----------------------
+Deve esistere un solo processo CERTAMENT effettivo per ambiente.
+
+Obiettivo:
+evitare due rinnovi simultanei che possano contendersi:
+- config;
+- certificati;
+- IIS;
+- HTTP.sys;
+- archivi;
+- lock di BC.
+
+18. ARCHIVIAZIONE
+-----------------
+Il PFX deve essere archiviato solo quando il rinnovo completo è riuscito.
+
+Non deve accadere:
+    import OK -> archivio OK -> IIS fallisce
+
+e poi l'operazione venga considerata conclusa.
+
+Regola:
+full success first, archive second.
+
+19. LOGGING
+-----------
+I log devono consentire di ricostruire:
+- cosa è stato scoperto;
+- quale certificato era attivo;
+- perché è stato scelto un PFX;
+- quali istanze sono state aggiornate;
+- quali binding sono stati aggiornati;
+- quali verifiche sono state fatte;
+- eventuali recovery;
+- esito finale.
+
+Non devono contenere segreti non necessari.
+
+20. RECOVERY / FAIL-SAFE
+------------------------
+CERTAMENT deve comportarsi come una piccola macchina a stati:
+
+DISCOVERY
+  ->
+VALIDATION
+  ->
+SNAPSHOT
+  ->
+PREPARE
+  ->
+UPDATE BC
+  ->
+VERIFY BC
+  ->
+UPDATE IIS/SSL
+  ->
+VERIFY IIS/SSL
+  ->
+NOTIFY
+  ->
+ARCHIVE
+  ->
+SUCCESS
+
+Se un passaggio critico fallisce:
+- non continuare indiscriminatamente;
+- eseguire recovery;
+- riportare chiaramente lo stato;
+- lasciare il minimo cambiamento possibile.
+
+21. PRINCIPIO DI MINIMO IMPATTO
+-------------------------------
+CERTAMENT deve modificare esclusivamente:
+- gli oggetti target;
+- i certificati target;
+- i binding target;
+- le risorse necessarie al rinnovo.
+
+Non deve toccare:
+- altre istanze BC;
+- altri siti IIS;
+- altri binding HTTPS;
+- URLACL non pertinenti;
+- PFX di altri ambienti;
+- configurazioni unrelated.
+
+22. PRODUZIONE E AFFIDABILITÀ
+-----------------------------
+L'obiettivo finale non è semplicemente "far funzionare lo script".
+
+È avere una automazione production-capable con:
+- comportamento deterministico;
+- fail-closed;
+- recovery;
+- verifiche post-update;
+- logging utile;
+- osservabilità;
+- minimo impatto;
+- esecuzione ripetibile;
+- compatibilità con ambienti BC on-prem differenti.
+
+23. OBIETTIVO DEL TESTER
+------------------------
+Il tester E2E non deve ricreare CERTAMENT.
+
+Deve:
+- fotografare lo stato reale;
+- predisporre un ambiente di scenario;
+- eseguire il vero CERTAMENT;
+- controllare BC/IIS/HTTP.sys/certificati;
+- verificare expected change;
+- verificare absence of unexpected change;
+- ripristinare la baseline;
+- verificare che il restore sia completo.
+
+Il tester deve dimostrare non solo:
+    "CERTAMENT è terminato senza errori"
+
+ma:
+    "CERTAMENT ha fatto esattamente ciò che doveva fare
+     e non ha modificato nient'altro."
+
+24. DEFINITION OF DONE DEL PROGETTO
+-----------------------------------
+CERTAMENT è pronto per produzione quando:
+
+- discovery BC affidabile;
+- selezione PFX deterministica e sicura;
+- validazione certificato adeguata;
+- snapshot eseguito prima del cambiamento;
+- update BC completo e verificato;
+- update IIS mirato e verificato;
+- HTTP.sys coerente;
+- URLACL preservati;
+- restart policy rispettata;
+- readiness verificata;
+- partial failure gestita;
+- recovery verificabile;
+- archive solo dopo successo;
+- notifiche affidabili;
+- heartbeat/monitoring affidabile;
+- scheduled task affidabile;
+- mutex/concorrenza gestita;
+- log sufficienti;
+- nessun cambiamento unrelated.
+
+25. OBIETTIVO IN UNA FRASE
+--------------------------
+CERTAMENT deve rendere automatico il rinnovo dei certificati TLS di
+Business Central on-prem, ma con comportamento da sistema di produzione:
+mirato, verificato, fail-safe, recuperabile, osservabile e senza effetti
+collaterali.

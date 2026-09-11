@@ -1,0 +1,421 @@
+CERTAMENT — SPECIFICA PER GITHUB COPILOT
+E2E Scenario Runner per Windows PowerShell 5.1 / Business Central on-prem
+
+OBIETTIVO
+Costruire un tester/runner leggero che esegua il VERO CERTAMENT:
+    C:\CERTAMENT\_MAINCertManager.ps1
+
+Il tester deve preparare lo scenario, eseguire lo script reale, verificare BC/IIS/HTTP.sys/certificati, rilevare drift inattesi e ripristinare SEMPRE la baseline.
+
+NON simulare la logica di CERTAMENT.
+NON usare il tester per implementare una versione alternativa di CERTAMENT.
+
+PRINCIPI
+- Target: Windows PowerShell 5.1.
+- Admin obbligatorio.
+- Un solo script principale: CertamentScenarioRunner.ps1.
+- Niente framework enorme.
+- Mai fidarsi solo dell'exit code.
+- Ogni scenario: baseline -> prepare -> run REAL CERTAMENT -> verify -> restore -> verify baseline.
+- Restore sempre in finally.
+- Restore failure = FAIL.
+- Unexpected drift = FAIL.
+
+COMPATIBILITÀ POWERSHELL 5.1
+- Non assumere che .Count esista. Usare @($value).Count.
+- Non usare Get-Website().Bindings; usare Get-WebBinding.
+- Per BC usare $instance.ServerInstance, non $instance.Name.
+- Non assumere HostHeader/Name/Bindings/Count senza verificare la shape.
+- Preferire variabili pre-calcolate e [pscustomobject].
+- Evitare sintassi fragile per PS 5.1.
+
+TOPOLOGIA REALE DELLA VM
+BC 26.0.38743.0
+
+Istanze:
+- MicrosoftDynamicsNavServer$BC260: Stopped, Disabled. Deve restare così.
+- MicrosoftDynamicsNavServer$PROD: Running. Deve restare invariata salvo test dedicato.
+- MicrosoftDynamicsNavServer$PROD_NUP: Running, cert D47E8F5E0B919DD97F78F091473A0042939F6D17
+- MicrosoftDynamicsNavServer$PROD_NUP2: Running, cert A5891105744CD279BAB93194C2A5032CD59AEB62
+
+BC Web:
+- BC260
+- PROD
+- PROD_NUP
+- PROD_NUP2
+
+IIS target site:
+Microsoft Dynamics 365 Business Central Web Client
+
+IIS bindings attesi:
+- *:80:
+- *:8080:
+- *:443:
+HTTPS *:443: -> A5891105744CD279BAB93194C2A5032CD59AEB62
+
+HTTP.sys rilevante:
+- 0.0.0.0:443  -> A589...
+- 0.0.0.0:7055 -> D47E...
+- 0.0.0.0:7057 -> D47E...
+- 0.0.0.0:7058 -> D47E...
+- 0.0.0.0:7065 -> A589...
+- 0.0.0.0:7067 -> A589...
+- 0.0.0.0:7068 -> A589...
+
+URLACL: fare snapshot e confronto, senza cancellare/recreare indiscriminatamente.
+Esistono anche URLACL unrelated e devono restare intatti.
+
+CERTAMENT:
+- C:\CERTAMENT\config.json
+- C:\CERTAMENT\_MAINCertManager.ps1
+- Config reale Pfx.Path = C:\_install
+
+ATTENZIONE C:\_install
+Contiene molti file e file molto grandi.
+NON fare scansioni ricorsive.
+NON hashare tutta la directory.
+Per i PFX usare SOLO:
+    Get-ChildItem C:\_install -Filter *.pfx -File
+
+DOCTOR
+Controllare senza modifiche:
+- PowerShell 5.1
+- Admin
+- C:\CERTAMENT
+- config.json
+- _MAINCertManager.ps1
+- NavAdminTool
+- Microsoft.Dynamics.Nav.Management
+- WebAdministration
+- IIS/W3SVC
+- PKI
+- netsh
+
+SELFTEST
+Read-only. Eseguire davvero:
+- Get-NAVServerInstance
+- Get-NAVServerConfiguration
+- Get-NAVWebServerInstance
+- Get-WebBinding
+- netsh http show sslcert
+- netsh http show urlacl
+- Get-ChildItem Cert:\LocalMachine\My
+
+NON fare source-code scanning del runner.
+
+PREFLIGHT
+Read-only. Verificare:
+1. BC instances
+2. BC certificate configuration
+3. certificate store
+4. BC web instances
+5. IIS sites/bindings
+6. HTTP.sys SSL
+7. URLACL
+8. CERTAMENT config
+9. PFX inventory
+10. target assumptions
+
+BASELINE
+Prima di ogni scenario salvare:
+- BC ServerInstance, State, StartupType se disponibile, Version, ServiceAccount
+- BC certificate thumbprint, exists, private key, NotBefore, NotAfter, Subject, SAN, EKU
+- BC Web instance metadata
+- IIS site state e binding/protocol/cert/store/sslFlags
+- HTTP.sys endpoint/hash/AppId/store
+- URLACL raw + versione normalizzata
+- relevant certificate store entries
+- CERTAMENT config esatta
+- PFX inventory limitata ai PFX dello scenario
+
+La baseline deve essere serializzata in JSON.
+
+CONFIG
+Prima di modificare config.json:
+- backup esatto
+- hash originale
+- salvare contenuto originale
+
+Per il test usare una directory PFX isolata, ad esempio:
+C:\ProgramData\EOS\Certament\ScenarioRuns\<RunId>\pfx
+
+NON modificare i PFX reali di C:\_install.
+
+Dopo il test ripristinare config.json byte-for-byte e verificare l'hash.
+
+CERTIFICATI DI TEST
+FriendlyName:
+- CERTAMENT-LAB-OLD-...
+- CERTAMENT-LAB-NEW-...
+- CERTAMENT-LAB-WRONGSAN-...
+- CERTAMENT-LAB-EXPIRED-...
+
+Devono avere:
+- private key
+- Server Authentication EKU
+- SAN appropriato quando previsto
+- NotBefore/NotAfter coerenti
+
+Expired: NotAfter realmente nel passato.
+WrongSAN: SAN volutamente errato.
+
+Dopo ogni scenario eliminare SOLO certificati/file LAB creati dal runner.
+
+PIPELINE DI OGNI SCENARIO
+1. create run directory
+2. capture baseline
+3. prepare scenario
+4. generate/install test PFX
+5. update temporary CERTAMENT config
+6. capture prepared state
+7. eseguire il VERO:
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\CERTAMENT\_MAINCertManager.ps1
+8. timeout configurabile, default circa 15 min
+9. salvare exit code/stdout/stderr
+10. capture post-run state
+11. verify expected changes
+12. verify no unexpected changes
+13. restore in finally
+14. capture final state
+15. compare final state alla baseline
+16. report PASS/FAIL/WARN
+
+ASSERTIONS
+Ogni scenario deve produrre:
+- Id
+- Description
+- Expected
+- Actual
+- Result
+- Evidence
+
+Exit code 0 NON equivale automaticamente a PASS.
+
+SCENARI MINIMI
+
+S01 NoOp
+- certificati validi
+- nessun rinnovo necessario
+- nessuna modifica BC/IIS/HTTP.sys/unrelated
+- baseline invariata
+
+S02 PfxMissing
+- rinnovo necessario
+- nessun PFX valido
+- CERTAMENT deve segnalare errore/assenza PFX
+- nessun cambio distruttivo
+
+S03 WrongPassword
+- PFX valido con password errata
+- import fallisce
+- nessun rinnovo riuscito
+- nessuna modifica distruttiva
+
+S04 ExpiredPfx
+- PFX NotAfter nel passato
+- deve essere rifiutato
+- nessun rinnovo
+
+S05 WrongSAN
+- PFX valido ma SAN errato
+- comportamento desiderato: REJECT
+- se viene accettato: SECURITY GAP, non PASS
+
+S06 PfxNotNewer
+- certificato attuale più nuovo del PFX
+- nessun rinnovo
+
+S07 AlreadyCurrent
+- BC/IIS già sul nuovo cert
+- nessuna azione distruttiva o restart inutile
+
+S08 HappyPath
+- old cert
+- new valid PFX
+- eseguire il vero CERTAMENT
+- verificare:
+  * target BC thumbprint == NEW
+  * private key true
+  * NotAfter corretto
+  * IIS *:443: == NEW quando previsto
+  * HTTP.sys target == NEW
+  * BC service state corretto
+  * endpoint HTTPS raggiungibile
+  * nessuna istanza non target modificata
+  * archive solo secondo la reale logica di CERTAMENT
+
+S09 MultiGroup
+- testare PROD_NUP e PROD_NUP2 insieme
+- entrambi corretti
+- PROD invariata
+- BC260 invariata/disabilitata
+
+S10 MultipleCandidates
+- due PFX validi
+- registrare candidati e selezione
+- riportare quale è stato scelto e perché
+- non classificare automaticamente la logica attuale come sicurezza corretta
+
+S11 UnrelatedPfxPresent
+- PFX di altro soggetto/cliente
+- verificare che non venga selezionato impropriamente
+
+S12 RestartPolicy
+- con IIS.RestartAfterUpdate=false verificare assenza di restart non previsto
+- con true verificare il comportamento previsto
+
+DRIFT DETECTION
+Normalizzare prima del confronto.
+
+Record canonici esempio:
+    BC|ServerInstance|State|Thumbprint
+    IIS|Site|Protocol|BindingInformation|CertificateHash
+    SSL|Endpoint|CertificateHash|ApplicationId|Store
+    URLACL|NormalizedReservation
+    CERT|Thumbprint|PrivateKey|NotAfter
+    PFX|Name|SHA256
+
+Confrontare record canonici, non oggetti PowerShell complessi.
+
+Classificare:
+- EXPECTED
+- UNEXPECTED
+
+Esempio:
+Expected:
+    PROD_NUP old -> new
+Unexpected:
+    PROD old -> new
+=> FAIL
+
+RESTORE
+Restore SEMPRE in finally.
+
+Ripristinare:
+- config.json
+- eventuale password/test config
+- BC certificate configuration
+- service state/startup type
+- IIS target binding
+- HTTP.sys modificato dal test
+- URLACL creati/modificati dal test
+- test certificates
+- test PFX
+- file di scenario
+
+NON:
+- cancellare C:\_install
+- iisreset
+- eliminare binding unrelated
+- eliminare certificati reali
+- eliminare URLACL unrelated
+
+RESTORE VERIFICATION
+Dopo restore:
+- nuovo snapshot
+- unexpected drift deve essere 0
+- se drift != 0 => RESTORE FAIL e scenario FAIL
+
+REPORT
+Directory:
+run\
+  baseline.json
+  prepared.json
+  postrun.json
+  final.json
+  scenario-result.json
+  certament-output\stdout.txt
+  certament-output\stderr.txt
+  pfx\
+  report.json
+  report.html opzionale
+
+Output esempio:
+PASS  Doctor
+PASS  SelfTest
+PASS  Preflight
+PASS  NoOp
+PASS  PfxMissing
+PASS  WrongPassword
+PASS  ExpiredPfx
+FAIL  WrongSAN       SECURITY GAP
+PASS  PfxNotNewer
+PASS  AlreadyCurrent
+PASS  HappyPath
+PASS  MultiGroup
+WARN  MultipleCandidates
+PASS  UnrelatedPfxPresent
+PASS  RestartPolicy
+RESTORE: PASS
+UNEXPECTED DRIFT: 0
+
+CLI
+---
+.\CertamentScenarioRunner.ps1 -Action Doctor
+.\CertamentScenarioRunner.ps1 -Action SelfTest
+.\CertamentScenarioRunner.ps1 -Action Preflight
+.\CertamentScenarioRunner.ps1 -Action Baseline
+.\CertamentScenarioRunner.ps1 -Action RunScenario -Scenario NoOp
+.\CertamentScenarioRunner.ps1 -Action RunScenario -Scenario HappyPath
+.\CertamentScenarioRunner.ps1 -Action RunSuite
+.\CertamentScenarioRunner.ps1 -Action Restore
+.\CertamentScenarioRunner.ps1 -Action Report
+
+Doctor/SelfTest/Preflight/Baseline devono essere read-only.
+
+FAIL-CLOSED
+-----------
+Se il runner non riesce a leggere correttamente BC/IIS/HTTP.sys/config/baseline:
+- fermarsi
+- NON effettuare modifiche distruttive
+
+ERROR HANDLING
+--------------
+Ogni errore deve riportare:
+- phase
+- function
+- command
+- exception message
+- before state
+- current state
+- restore attempted
+- restore result
+
+GAP DA TESTARE
+--------------
+Valutare esplicitamente:
+1. PFX selection globale/latest LastWriteTime
+2. validazione SAN/EKU/private key
+3. partial BC update
+4. IIS recovery troppo ampia
+5. modifica involontaria di binding di altri siti
+6. snapshot failure prima di modifiche distruttive
+7. partial BC discovery
+8. archive solo dopo full success
+9. RestartAfterUpdate
+10. readiness polling vs fixed sleeps
+11. TLS trust vs identity
+12. unexpected state drift
+
+DEFINITION OF DONE
+------------------
+Il runner è pronto quando:
+- Doctor PASS
+- SelfTest PASS
+- Preflight PASS
+- NoOp PASS
+- almeno un negativo PASS
+- HappyPath PASS con postconditions reali
+- MultiGroup PASS
+- RestartPolicy PASS
+- Restore PASS
+- unexpected drift = 0
+- output salvato
+- nessun PFX reale modificato
+- nessun binding unrelated modificato
+- nessun servizio unrelated alterato
+- nessuna dipendenza da PowerShell 7
+- nessun .Count fragile
+- nessun Get-Website().Bindings
+- nessun -Recurse su C:\_install
+- nessun iisreset

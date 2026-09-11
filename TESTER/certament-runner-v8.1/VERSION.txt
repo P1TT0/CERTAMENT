@@ -1,0 +1,2 @@
+CERTAMENT Scenario Runner V8.1
+Target: Windows PowerShell 5.1 / BC 26 on-prem sandbox
