@@ -282,15 +282,45 @@ function Get-CertificateDnsNames {
     return @()
 }
 
+function Get-ConfiguredEndpointDnsNames {
+    param([string]$SiteName,[string]$BindingInformation)
+    $configured=@()
+    if($config.IIS -and $config.IIS.ExpectedDnsNames){$configured+=@($config.IIS.ExpectedDnsNames)}
+    try {
+        Import-Module WebAdministration -ErrorAction Stop
+        $binding=Get-WebBinding -Name $SiteName -Protocol 'https' -ErrorAction Stop|Where-Object{[string]$_.BindingInformation -eq $BindingInformation}|Select-Object -First 1
+        if($null -ne $binding -and -not [string]::IsNullOrWhiteSpace([string]$binding.HostHeader)){$configured+=[string]$binding.HostHeader}
+    } catch { }
+    $normalized=@()
+    foreach($name in @($configured)){
+        $value=([string]$name -replace '\s+','').Trim().ToLowerInvariant()
+        if(-not [string]::IsNullOrWhiteSpace($value)){$normalized+=$value}
+    }
+    return @($normalized|Sort-Object -Unique)
+}
+
+function Test-DnsIdentityMatch {
+    param([string[]]$ExpectedNames,[string[]]$CandidateNames)
+    foreach($expected in @($ExpectedNames)){
+        foreach($candidate in @($CandidateNames)){
+            if($expected -eq $candidate){return $true}
+            if($expected.StartsWith('*.') -and $candidate -like ('*.'+$expected.Substring(2))){return $true}
+            if($candidate.StartsWith('*.') -and $expected -like ('*.'+$candidate.Substring(2))){return $true}
+        }
+    }
+    return $false
+}
+
 function Test-PfxCandidate {
     param(
         [object]$Certificate,
-        [object]$CurrentCertificate
+        [object]$CurrentCertificate,
+        [string[]]$ExpectedDnsNames
     )
 
-    $targetNames=@(Get-CertificateDnsNames $CurrentCertificate | ForEach-Object { $_.Trim().ToLowerInvariant() })
     $candidateNames=@(Get-CertificateDnsNames $Certificate | ForEach-Object { $_.Trim().ToLowerInvariant() })
-    if($targetNames.Count -eq 0 -or @($candidateNames|Where-Object { $targetNames -contains $_ }).Count -eq 0){return 'SAN/DNS identity does not match current BC certificate'}
+    if(@($ExpectedDnsNames).Count -eq 0){return 'No configured IIS/BC endpoint DNS identity is available'}
+    if(-not (Test-DnsIdentityMatch -ExpectedNames $ExpectedDnsNames -CandidateNames $candidateNames)){return 'SAN/DNS identity does not match configured endpoint'}
     $serverAuth=@($Certificate.EnhancedKeyUsageList|Where-Object{[string]$_.ObjectId.Value -eq '1.3.6.1.5.5.7.3.1' -or [string]$_.FriendlyName -eq 'Server Authentication'})
     if($serverAuth.Count -eq 0){return 'Server Authentication EKU missing'}
     if($Certificate.NotAfter -lt (Get-Date)){return 'PFX certificate is expired'}
@@ -302,14 +332,15 @@ function Select-PfxCandidate {
     param(
         [object[]]$Candidates,
         [securestring]$Password,
-        [object]$CurrentCertificate
+        [object]$CurrentCertificate,
+        [string[]]$ExpectedDnsNames
     )
     $valid=@();$rejected=@()
     foreach($file in @($Candidates)){
         try{
             $data=Get-PfxData -FilePath $file.FullName -Password $Password -ErrorAction Stop
             $certificate=$data.EndEntityCertificates|Select-Object -First 1
-            $reason=Test-PfxCandidate $certificate $CurrentCertificate
+            $reason=Test-PfxCandidate $certificate $CurrentCertificate $ExpectedDnsNames
             if($null -eq $reason){$valid+=[pscustomobject]@{File=$file;Data=$data;Certificate=$certificate}}
             else{$rejected+=[pscustomobject]@{Name=$file.Name;Reason=$reason}}
         }catch{$rejected+=[pscustomobject]@{Name=$file.Name;Reason='PFX unreadable or password invalid'}}
@@ -1402,7 +1433,9 @@ function Main {
         }
 
         $pfxPassword = ConvertTo-SecureString $pfxPasswordPlain -AsPlainText -Force
-        $selection=Select-PfxCandidate -Candidates $pfxCandidates -Password $pfxPassword -CurrentCertificate $certDetails
+        $expectedDnsNames=@(Get-ConfiguredEndpointDnsNames -SiteName $iisSiteName -BindingInformation '*:443:')
+        Write-Host ("Identita' DNS endpoint configurata: {0}" -f ($(if($expectedDnsNames.Count -gt 0){$expectedDnsNames -join ', '}else{'nessuna'})))
+        $selection=Select-PfxCandidate -Candidates $pfxCandidates -Password $pfxPassword -CurrentCertificate $certDetails -ExpectedDnsNames $expectedDnsNames
         $selected=$selection.Selected
         if($null -eq $selected){
             Write-Warning "Nessun PFX valido e pertinente trovato in $pfxPath"

@@ -10,6 +10,7 @@
 - **WrongSan** — PFX valido ma SAN non pertinente; deve essere rifiutato.
 - **MultipleCandidates** — PFX pertinenti multipli; deve essere scelto deterministicamente il certificato con validita' migliore.
 - **UnrelatedPfx** — PFX più recente ma identita' non pertinente; deve essere rifiutato.
+- **EndpointIdentityMissing** — certificato corrente con SAN legacy e nessun hostname endpoint configurato; il nuovo PFX non deve essere accettato per inferenza dal certificato precedente.
 - **AlreadyCurrent** — BC target, IIS 443 e HTTP.sys già sul certificato LAB nuovo; atteso no-op.
 
 ## Renewal
@@ -17,3 +18,4 @@
 - **HappyPath** — target coerente sul vecchio LAB; atteso rinnovo completo BC + IIS + HTTP.sys.
 - **MultiGroup** — `PROD_NUP` e `PROD_NUP2` condividono lo stesso vecchio LAB; atteso rinnovo di entrambe.
 - **RestartPolicy** — come HappyPath ma `IIS.RestartAfterUpdate=false`; atteso aggiornamento senza `iisreset`.
+- **EndpointIdentityConfigured** — certificato corrente con SAN legacy ma `IIS.ExpectedDnsNames` configurato; il PFX con SAN endpoint corretto deve essere accettato.

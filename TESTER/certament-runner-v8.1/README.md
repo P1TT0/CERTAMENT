@@ -63,6 +63,8 @@ Provisioning automatico e reversibile di uno scenario, senza eseguire CERTAMENT:
 
 `Provision` crea certificati e PFX LAB nella directory del run, prepara temporaneamente BC, IIS e HTTP.sys, salva gli snapshot e ripristina subito la baseline. `Run` esegue lo stesso provisioning automaticamente prima del vero CERTAMENT. Il runner non installa Business Central o IIS da zero: questi componenti devono esistere nella VM, mentre la preparazione dei dati e dello stato necessari agli scenari e' automatica.
 
+La validazione SAN usa `IIS.ExpectedDnsNames` se configurato, altrimenti l'hostname del binding HTTPS IIS. Se entrambi sono assenti, CERTAMENT rifiuta il PFX in modo fail-closed invece di usare il certificato precedente come autorita' DNS.
+
 Le prove di failure injection durante aggiornamenti parziali (BC aggiornato + IIS failure, IIS aggiornato + HTTP.sys failure, snapshot failure, archive failure e conflitti di binding/permessi) sono pianificate ma non vengono simulate artificialmente dalla V8.1 corrente. Restano criteri futuri con rollback obbligatorio.
 
 Recovery:

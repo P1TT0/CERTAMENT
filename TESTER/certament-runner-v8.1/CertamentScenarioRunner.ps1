@@ -35,15 +35,17 @@ $ScenarioCatalog = [ordered]@{
     WrongSan           = 'PFX valido ma SAN non pertinente; deve essere rifiutato senza aggiornamenti.'
     MultipleCandidates = 'Due PFX pertinenti; deve essere scelto deterministicamente il certificato migliore.'
     UnrelatedPfx       = 'PFX piu recente ma SAN non pertinente; deve essere rifiutato senza aggiornamenti.'
+        EndpointIdentityMissing = 'SAN legacy nel certificato corrente e nessun hostname endpoint configurato; deve rifiutare il nuovo PFX.'
+        EndpointIdentityConfigured = 'SAN legacy nel certificato corrente e hostname endpoint configurato; deve accettare il nuovo PFX coerente con endpoint.'
     AlreadyCurrent     = 'BC e IIS gia sul certificato LAB nuovo; atteso: no-op.'
     HappyPath          = 'Rinnovo coerente di PROD_NUP2: BC, IIS e HTTP.sys puntano al vecchio LAB prima del run.'
     MultiGroup         = 'Un solo certificato vecchio LAB condiviso da PROD_NUP + PROD_NUP2; atteso: entrambi aggiornati.'
     RestartPolicy      = 'HappyPath con IIS.RestartAfterUpdate=false; atteso: aggiornamento senza iisreset.'
 }
 $SuiteCatalog = @{
-    Core    = @('NoOp','PfxMissing','WrongPassword','PfxExpired','PfxNotNewer','WrongSan','MultipleCandidates','UnrelatedPfx','AlreadyCurrent')
-    Renewal = @('HappyPath','MultiGroup','RestartPolicy')
-    All     = @('NoOp','PfxMissing','WrongPassword','PfxExpired','PfxNotNewer','WrongSan','MultipleCandidates','UnrelatedPfx','AlreadyCurrent','HappyPath','MultiGroup','RestartPolicy')
+    Core    = @('NoOp','PfxMissing','WrongPassword','PfxExpired','PfxNotNewer','WrongSan','MultipleCandidates','UnrelatedPfx','EndpointIdentityMissing','AlreadyCurrent')
+    Renewal = @('HappyPath','MultiGroup','RestartPolicy','EndpointIdentityConfigured')
+    All     = @('NoOp','PfxMissing','WrongPassword','PfxExpired','PfxNotNewer','WrongSan','MultipleCandidates','UnrelatedPfx','EndpointIdentityMissing','AlreadyCurrent','HappyPath','MultiGroup','RestartPolicy','EndpointIdentityConfigured')
 }
 
 function Info([string]$m){ Write-Host "[INFO] $m" -ForegroundColor Cyan }
@@ -97,13 +99,14 @@ function Get-ConfiguredIISSite {
     return 'Microsoft Dynamics 365 Business Central Web Client'
 }
 function Set-PfxPath([string]$path){$cfg=Get-ConfigObject;$cfg.Pfx.Path=$path;Set-ConfigObject $cfg}
-function Set-TestRenewalSettings([int]$notifyDays,[bool]$restartAfterUpdate){
+function Set-TestRenewalSettings([int]$notifyDays,[bool]$restartAfterUpdate,[string[]]$expectedDnsNames=@('bc.cert.pitto')){
     $cfg=Get-ConfigObject
     if($null -eq $cfg.Notifications){$cfg | Add-Member NoteProperty Notifications ([pscustomobject]@{}) -Force}
     if($null -eq $cfg.Notifications.CertificateExpiry){$cfg.Notifications | Add-Member NoteProperty CertificateExpiry ([pscustomobject]@{}) -Force}
     $cfg.Notifications.CertificateExpiry.NotifyBeforeDays=$notifyDays
     if($null -eq $cfg.IIS){$cfg | Add-Member NoteProperty IIS ([pscustomobject]@{}) -Force}
     $cfg.IIS.RestartAfterUpdate=$restartAfterUpdate
+    if($cfg.IIS.PSObject.Properties['ExpectedDnsNames']){$cfg.IIS.ExpectedDnsNames=@($expectedDnsNames)}else{$cfg.IIS|Add-Member NoteProperty ExpectedDnsNames @($expectedDnsNames) -Force}
     Set-ConfigObject $cfg
 }
 
@@ -309,6 +312,12 @@ function Prepare-Scenario([string]$name,[string]$runDir,$before){
             Write-LabPassword $prep.LabPfxDir 'CERTAMENT-LAB-WRONG-PASSWORD'
             Set-FileAge $newRef.PfxPath (Get-Date);Set-FileAge $oldRef.PfxPath (Get-Date).AddMinutes(-2)
         }
+            'EndpointIdentityMissing' {
+                $cfg=Get-ConfigObject;if($cfg.IIS.PSObject.Properties['ExpectedDnsNames']){$cfg.IIS.PSObject.Properties.Remove('ExpectedDnsNames')};Set-ConfigObject $cfg
+                $oldRef=New-LabCert "CERTAMENT-LAB-$((Split-Path $runDir -Leaf))-LEGACY" @('legacy.cert.pitto') 20 $prep.SecurePassword $prep.LabPfxDir
+                $newRef=New-LabCert "CERTAMENT-LAB-$((Split-Path $runDir -Leaf))-ENDPOINT" @('bc.cert.pitto') 3650 $prep.SecurePassword $prep.LabPfxDir
+                Set-FileAge $newRef.PfxPath (Get-Date);Set-FileAge $oldRef.PfxPath (Get-Date).AddMinutes(-2)
+            }
         'PfxExpired' {
             $oldRef=New-LabCert "CERTAMENT-LAB-$((Split-Path $runDir -Leaf))-OLD" @('bc.cert.pitto',$env:COMPUTERNAME) 20 $prep.SecurePassword $prep.LabPfxDir
             $badRef=New-LabCert "CERTAMENT-LAB-$((Split-Path $runDir -Leaf))-EXPIRED" @('bc.cert.pitto',$env:COMPUTERNAME) -0.1 $prep.SecurePassword $prep.LabPfxDir
@@ -344,6 +353,11 @@ function Prepare-Scenario([string]$name,[string]$runDir,$before){
         'HappyPath' {
             $oldRef=New-LabCert "CERTAMENT-LAB-$((Split-Path $runDir -Leaf))-OLD" @('bc.cert.pitto',$env:COMPUTERNAME) 20 $prep.SecurePassword $prep.LabPfxDir
             $newRef=New-LabCert "CERTAMENT-LAB-$((Split-Path $runDir -Leaf))-NEW" @('bc.cert.pitto',$env:COMPUTERNAME) 3650 $prep.SecurePassword $prep.LabPfxDir
+            Set-FileAge $newRef.PfxPath (Get-Date);Set-FileAge $oldRef.PfxPath (Get-Date).AddMinutes(-2)
+        }
+        'EndpointIdentityConfigured' {
+            $oldRef=New-LabCert "CERTAMENT-LAB-$((Split-Path $runDir -Leaf))-LEGACY" @('legacy.cert.pitto') 20 $prep.SecurePassword $prep.LabPfxDir
+            $newRef=New-LabCert "CERTAMENT-LAB-$((Split-Path $runDir -Leaf))-ENDPOINT" @('bc.cert.pitto') 3650 $prep.SecurePassword $prep.LabPfxDir
             Set-FileAge $newRef.PfxPath (Get-Date);Set-FileAge $oldRef.PfxPath (Get-Date).AddMinutes(-2)
         }
         'MultiGroup' {
@@ -491,8 +505,8 @@ function Evaluate-Scenario($name,$exec,$before,$preparedState,$after,$prep){
     if($name -in @('NoOp','AlreadyCurrent')){
         if($exec.ExitCode -eq 0 -and @(Get-Drift $preparedState $after).Count -eq 0){return 'PASS'};return 'FAIL'
     }
-    if($name -in @('PfxMissing','WrongPassword','PfxExpired','PfxNotNewer','WrongSan','UnrelatedPfx','MultipleCandidates')){return Evaluate-Negative $name $exec $preparedState $after $before}
-    if($name -in @('HappyPath','RestartPolicy','MultiGroup')){
+    if($name -in @('PfxMissing','WrongPassword','PfxExpired','PfxNotNewer','WrongSan','UnrelatedPfx','MultipleCandidates','EndpointIdentityMissing')){return Evaluate-Negative $name $exec $preparedState $after $before}
+    if($name -in @('HappyPath','RestartPolicy','MultiGroup','EndpointIdentityConfigured')){
         if($exec.ExitCode -ne 0 -or $exec.TimedOut){return 'FAIL'}
         $target=Find-BCRow $after $TargetInstance;$newThumb=Normalize-Thumb $prep.New.Thumbprint;$site=$prep.Site;$iis=Find-IISBinding $after $site $TargetBinding
         Assert-True ($null -ne $target) "Target BC assente dopo $name";Assert-True ($target.Thumbprint -eq $newThumb) "BC target non aggiornato: trovato $($target.Thumbprint), atteso $newThumb";Assert-True ($target.ServiceStatus -eq 'Running') "BC target non Running dopo $name";Assert-True ($null -ne $iis -and (Normalize-Thumb $iis.CertificateHash) -eq $newThumb) "IIS 443 non aggiornato a $newThumb"
@@ -582,15 +596,15 @@ function Preflight{
     if(@($snap.HttpSSL|Where-Object{[string]::IsNullOrWhiteSpace([string]$_.AppId)}).Count -gt 0){$issues+='HTTP.sys SSL binding without AppId cannot be restored safely'}
     $labs=@(Get-CertState|Where-Object{[string]$_.FriendlyName -like 'CERTAMENT-LAB-*'});if($labs.Count -gt 0){$issues+='CERTAMENT-LAB-* certificates already installed'}
     if(@(Get-PfxState).Count -gt 0){Info "PFX real path: $(@(Get-PfxState).Count) file(s); only PFX are hashed."}
-    $rows=@([pscustomobject]@{Check='PS5.1';Passed=($PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -eq 1)},[pscustomobject]@{Check='Admin';Passed=$true},[pscustomobject]@{Check='BC discovered';Passed=(@($snap.BC).Count -gt 0)},[pscustomobject]@{Check='Target';Passed=($null -ne $target)},[pscustomobject]@{Check='IIS target binding';Passed=($null -ne $iis)},[pscustomobject]@{Check='BC/IIS thumb aligned';Passed=($null -ne $target -and $null -ne $iis -and (Normalize-Thumb $target.Thumbprint) -eq (Normalize-Thumb $iis.CertificateHash))},[pscustomobject]@{Check='No stale LAB certs';Passed=($labs.Count -eq 0)},[pscustomobject]@{Check='Scenario catalog';Passed=($ScenarioCatalog.Count -eq 12)})
+    $rows=@([pscustomobject]@{Check='PS5.1';Passed=($PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -eq 1)},[pscustomobject]@{Check='Admin';Passed=$true},[pscustomobject]@{Check='BC discovered';Passed=(@($snap.BC).Count -gt 0)},[pscustomobject]@{Check='Target';Passed=($null -ne $target)},[pscustomobject]@{Check='IIS target binding';Passed=($null -ne $iis)},[pscustomobject]@{Check='BC/IIS thumb aligned';Passed=($null -ne $target -and $null -ne $iis -and (Normalize-Thumb $target.Thumbprint) -eq (Normalize-Thumb $iis.CertificateHash))},[pscustomobject]@{Check='No stale LAB certs';Passed=($labs.Count -eq 0)},[pscustomobject]@{Check='Scenario catalog';Passed=($ScenarioCatalog.Count -eq 14)})
     $rows|Format-Table -AutoSize;if($issues.Count -gt 0){throw ('PREFLIGHT FAIL: '+($issues -join '; '))};Ok 'Preflight PASS'
 }
-function SelfTest{Initialize-Platform;Ensure-Dirs;$snap=New-Snapshot;Assert-True ($ScenarioCatalog.Count -eq 12) 'Catalogo scenari incompleto.';Assert-True (@($snap.BC).Count -gt 0) 'BC non rilevato.';Assert-True (@($snap.IIS).Count -gt 0) 'IIS non rilevato.';Assert-True ($null -ne $snap.HttpSSL) 'HTTP.sys probe fallita.';Assert-True ($null -ne $snap.UrlAcl) 'URLACL probe fallita.';Assert-True ($null -ne $snap.Certificates) 'Certificate store probe fallita.';Ok "SelfTest PASS - BC=$(@($snap.BC).Count), IIS=$(@($snap.IIS).Count), SSL bindings=$(@($snap.HttpSSL).Count), URLACL=$(@($snap.UrlAcl).Count)"}
+function SelfTest{Initialize-Platform;Ensure-Dirs;$snap=New-Snapshot;Assert-True ($ScenarioCatalog.Count -eq 14) 'Catalogo scenari incompleto.';Assert-True (@($snap.BC).Count -gt 0) 'BC non rilevato.';Assert-True (@($snap.IIS).Count -gt 0) 'IIS non rilevato.';Assert-True ($null -ne $snap.HttpSSL) 'HTTP.sys probe fallita.';Assert-True ($null -ne $snap.UrlAcl) 'URLACL probe fallita.';Assert-True ($null -ne $snap.Certificates) 'Certificate store probe fallita.';Ok "SelfTest PASS - BC=$(@($snap.BC).Count), IIS=$(@($snap.IIS).Count), SSL bindings=$(@($snap.HttpSSL).Count), URLACL=$(@($snap.UrlAcl).Count)"}
 function FastTest {
     $modulePath=Join-Path $PSScriptRoot '..\..\modules\Get-PfxFile.psm1'
     Import-Module $modulePath -Force -ErrorAction Stop
     Assert-True ((Normalize-Thumb " aa bb `r`ncc ") -eq 'AABBCC') 'Normalize-Thumb fallita.'
-    Assert-True ($ScenarioCatalog.Count -eq 12) 'Catalogo scenari incompleto.'
+    Assert-True ($ScenarioCatalog.Count -eq 14) 'Catalogo scenari incompleto.'
     foreach($suiteName in @('Core','Renewal','All')){
         Assert-True ($SuiteCatalog.ContainsKey($suiteName)) "Suite mancante: $suiteName"
         foreach($scenarioName in @($SuiteCatalog[$suiteName])){Assert-True ($ScenarioCatalog.Contains($scenarioName)) "Scenario mancante: $scenarioName"}
