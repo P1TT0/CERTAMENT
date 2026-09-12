@@ -137,6 +137,8 @@ Il report All piu' recente e' `C:\ProgramData\EOS\Certament\ScenarioRunnerV8\202
 
 Il Runner verifica indipendentemente BC thumbprint e stati Windows/NAV, binding IIS, binding HTTP.sys, certificate store/private key, drift prepared-post-run e drift baseline-post-restore. Un messaggio positivo nel log CERTAMENT o un exit code 0 da soli non possono produrre PASS.
 
+Il contratto oracle e' stato verificato con la suite All del 2026-09-12: 15 scenari, 15 PASS, 0 EXPECTED-GAP, 0 FAIL, `ProvisionValid=true`, `OutcomeValid=true`, `UnexpectedDrift=[]`, `BaselineRestored=true` e `RestoreDrift=[]` per ogni scenario.
+
 Copertura non simulata dalla suite: PKI/chain aziendale, trust client, CRL/OCSP, deployment live Azure, failure injection artificiale durante update parziali e topologie IIS con binding multipli reali appartenenti a certificate-group differenti.
 
 ## Limite di verifica
