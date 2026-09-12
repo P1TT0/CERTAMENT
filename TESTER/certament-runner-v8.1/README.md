@@ -139,6 +139,13 @@ Il Runner verifica indipendentemente BC thumbprint e stati Windows/NAV, binding 
 
 Il contratto oracle e' stato verificato con la suite All del 2026-09-12: 15 scenari, 15 PASS, 0 EXPECTED-GAP, 0 FAIL, `ProvisionValid=true`, `OutcomeValid=true`, `UnexpectedDrift=[]`, `BaselineRestored=true` e `RestoreDrift=[]` per ogni scenario.
 
+Revisione oracle 2026-09-12:
+
+- `ExpectedDrift` viene confrontato con drift strutturato per risorsa/proprieta', non solo per categoria top-level;
+- `NoOp`, `AlreadyCurrent` e `MultipleCandidates` verificano precondizioni reali prima di avviare CERTAMENT;
+- i negative scenario richiedono una categoria di rifiuto attesa e uno stato infrastrutturale invariato;
+- PASS richiede `ProvisionValid`, `OutcomeValid`, `UnexpectedDrift=[]`, `BaselineRestored=true` e `RestoreDrift=[]`.
+
 Copertura non simulata dalla suite: PKI/chain aziendale, trust client, CRL/OCSP, deployment live Azure, failure injection artificiale durante update parziali e topologie IIS con binding multipli reali appartenenti a certificate-group differenti.
 
 ## Limite di verifica
