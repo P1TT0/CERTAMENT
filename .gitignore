@@ -1,5 +1,12 @@
 # Runtime config (contains passwords/webhook URLs)
 config.json
+monitoring/local.settings.json
+
+# Local Azurite / Azure Functions Core Tools artifacts (monitoring E2E)
+monitoring/azurite-data/
+monitoring/azurite-debug.log
+monitoring/func-local.log
+monitoring/func-local.log.err
 
 # Certificate / private key files
 *.pfx

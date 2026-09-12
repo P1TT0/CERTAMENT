@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "tool": "CERTAMENT",
+  "version": "1.0.0",
+  "runId": "run-local-001",
+  "InstallationId": "install-example-001",
+  "customer": "Example Customer",
+  "server": "example-server",
+  "status": "Completed",
+  "stage": "MainEnd",
+  "detail": "Local monitoring example",
+  "timestampUtc": "2026-09-12T10:00:00Z",
+  "durationSec": 12.4,
+  "certificateDaysRemaining": 183,
+  "notificationStatus": "Sent"
+}

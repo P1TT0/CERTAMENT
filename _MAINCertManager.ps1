@@ -78,6 +78,9 @@ $configRaw = Get-Content -Raw -Path $configPath
 $configRaw = ($configRaw -split "\r?\n" | Where-Object { $_ -notmatch '^\s*//' }) -join "`n"
 $config = $configRaw | ConvertFrom-Json
 
+Import-Module (Join-Path $PSScriptRoot 'modules\InstallationIdentity.psm1') -Force
+$script:InstallationId = Get-OrCreateInstallationId -ConfigPath $configPath -Config $config
+
 # ============================================================
 # Logging
 # ============================================================
@@ -549,6 +552,7 @@ function Invoke-Heartbeat {
         stage     = $Stage
         detail    = $Detail
         timestampUtc = (Get-Date).ToUniversalTime().ToString('o')
+        InstallationId = $script:InstallationId
         durationSec = [math]::Round(((Get-Date)-$script:RunStartedAt).TotalSeconds,1)
         certificateDaysRemaining = $script:HeartbeatCertificateDaysRemaining
         notificationStatus = $script:NotificationStatus

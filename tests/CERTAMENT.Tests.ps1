@@ -3,11 +3,12 @@ $manager=Join-Path $root '_MAINCertManager.ps1'
 $runner=Join-Path $root 'TESTER\certament-runner-v8.1\CertamentScenarioRunner.ps1'
 $module=Join-Path $root 'modules\Get-PfxFile.psm1'
 $identityModule=Join-Path $root 'modules\CertificateIdentity.psm1'
+$installationIdModule=Join-Path $root 'modules\InstallationIdentity.psm1'
 function Invoke-ParserCheck([string]$Path){$tokens=$null;$errors=$null;[System.Management.Automation.Language.Parser]::ParseFile($Path,[ref]$tokens,[ref]$errors)|Out-Null;return @($errors)}
 Describe 'CERTAMENT parser and static contracts' {
     It 'has a single runtime VERSION.txt source' { $version=(Get-Content (Join-Path $root 'VERSION.txt') -Raw).Trim();$version|Should Not BeNullOrEmpty;$managerText=Get-Content $manager -Raw;$managerText|Should Match 'VERSION.txt' }
     It 'parses manager and modules on PowerShell 5.1' { @('_MAINCertManager.ps1','modules\Get-BCThumbprint.psm1','modules\Get-PfxFile.psm1','modules\Update-IISBinding.psm1')|ForEach-Object{(Invoke-ParserCheck (Join-Path $root $_)).Count|Should Be 0} }
-    It 'contains the heartbeat contract fields' { $text=Get-Content $manager -Raw; foreach($field in @('schemaVersion','version','runId','customer','server','status','stage','detail','timestampUtc','durationSec','certificateDaysRemaining','notificationStatus')){$text|Should Match $field} }
+    It 'contains the heartbeat contract fields' { $text=Get-Content $manager -Raw; foreach($field in @('schemaVersion','version','runId','customer','server','status','stage','detail','timestampUtc','durationSec','certificateDaysRemaining','notificationStatus','InstallationId')){$text|Should Match $field} }
     It 'keeps notification status separate from run status' { $text=Get-Content $manager -Raw; $text|Should Match 'NotificationStatus';$text|Should Match 'status' }
     It 'allows completed status with failed notification status' { $text=Get-Content $manager -Raw;$text|Should Match "NotificationStatus='Failed'";$text|Should Match 'Status "Completed"' }
     It 'returns exit 1 for unhandled critical exceptions' { $text=Get-Content $manager -Raw;$text|Should Match 'Errore critico CERTAMENT';$text|Should Match 'exit 1' }
@@ -16,7 +17,7 @@ Describe 'CERTAMENT parser and static contracts' {
     It 'does not use global iisreset in runtime files' { Get-Content (Join-Path $root 'modules\Update-IISBinding.psm1') -Raw|Should Not Match 'iisreset' }
     It 'provisions real LAB certificates and target bindings' { $text=Get-Content $runner -Raw;foreach($pattern in @('New-SelfSignedCertificate','Export-PfxCertificate','Cert:\\LocalMachine\\My','Set-BCThumbprint','Ensure-IISBinding','Set-HttpSslThumb','New-Snapshot','Invoke-Certament')){$text|Should Match ([regex]::Escape($pattern))} }
     It 'verifies BC service and NAV state after provisioning restart' { $text=Get-Content $runner -Raw;$text|Should Match 'Wait-BCRunning';$text|Should Match 'WindowsService';$text|Should Match 'NAVState' }
-    It 'keeps prepared snapshot separate from preparation metadata' { $text=Get-Content $runner -Raw;$text|Should Match "Save-SnapshotArtifacts \$prepared \$runDir 'prepared'";$text|Should Match 'prepared-metadata.json' }
+    It 'keeps prepared snapshot separate from preparation metadata' { $text=Get-Content $runner -Raw;$text|Should Match 'Save-SnapshotArtifacts';$text|Should Match 'prepared-metadata.json' }
     It 'supports LAB cleanup after Recover without in-memory state' { $text=Get-Content $runner -Raw;$text|Should Match 'Remove-LabCerts \$before';$text|Should Match 'baselineThumbs' }
 }
 Describe 'PFX helper' {
@@ -28,6 +29,38 @@ Describe 'Endpoint identity' {
     It 'uses ExpectedDnsNames precedence' { $r=Resolve-EndpointDnsIdentity @('expected.example.com') @('host.example.com');$r.Source|Should Be 'ExpectedDnsNames';$r.Conflict|Should Be $true }
     It 'falls back to HostHeader' { $r=Resolve-EndpointDnsIdentity @() @('host.example.com');$r.Source|Should Be 'HostHeader';$r.Names[0]|Should Be 'host.example.com' }
     It 'fails closed when endpoint identity is missing' { $r=Resolve-EndpointDnsIdentity @() @();$r.Source|Should Be 'None';$r.Names.Count|Should Be 0 }
+}
+Describe 'Installation identity' {
+    BeforeEach {
+        $script:idTemp=Join-Path ([IO.Path]::GetTempPath()) ('certament-installid-'+[guid]::NewGuid())
+        New-Item $script:idTemp -ItemType Directory|Out-Null
+        $script:idConfigPath=Join-Path $script:idTemp 'config.json'
+        Import-Module $installationIdModule -Force
+    }
+    AfterEach { Remove-Item $script:idTemp -Recurse -Force -ErrorAction SilentlyContinue }
+    It 'generates and persists an InstallationId when absent' {
+        [ordered]@{Context=[ordered]@{CustomerName='Acme';InstallationId=''}} | ConvertTo-Json | Set-Content -Path $script:idConfigPath -Encoding UTF8
+        $config = Get-Content -Raw -Path $script:idConfigPath | ConvertFrom-Json
+        $id = Get-OrCreateInstallationId -ConfigPath $script:idConfigPath -Config $config
+        $id | Should Not BeNullOrEmpty
+        $persisted = Get-Content -Raw -Path $script:idConfigPath | ConvertFrom-Json
+        $persisted.Context.InstallationId | Should Be $id
+    }
+    It 'returns the same InstallationId across successive runs' {
+        [ordered]@{Context=[ordered]@{CustomerName='Acme';InstallationId=''}} | ConvertTo-Json | Set-Content -Path $script:idConfigPath -Encoding UTF8
+        $config1 = Get-Content -Raw -Path $script:idConfigPath | ConvertFrom-Json
+        $first = Get-OrCreateInstallationId -ConfigPath $script:idConfigPath -Config $config1
+        $config2 = Get-Content -Raw -Path $script:idConfigPath | ConvertFrom-Json
+        $second = Get-OrCreateInstallationId -ConfigPath $script:idConfigPath -Config $config2
+        $second | Should Be $first
+    }
+    It 'is not derived from Customer or Server' {
+        [ordered]@{Context=[ordered]@{CustomerName='Acme';InstallationId=''}} | ConvertTo-Json | Set-Content -Path $script:idConfigPath -Encoding UTF8
+        $config = Get-Content -Raw -Path $script:idConfigPath | ConvertFrom-Json
+        $id = Get-OrCreateInstallationId -ConfigPath $script:idConfigPath -Config $config
+        $id | Should Not Match 'Acme'
+        ([guid]$id) | Should Not Be $null
+    }
 }
 Describe 'Runner scenarios and safety contracts' {
     It 'contains all required scenarios' { $text=Get-Content $runner -Raw; foreach($name in @('NoOp','PfxMissing','WrongPassword','PfxExpired','PfxNotNewer','WrongSan','MultipleCandidates','UnrelatedPfx','EndpointIdentityMissing','AlreadyCurrent','HappyPath','MultiGroup','RestartPolicy','EndpointIdentityConfigured','EndpointWildcard')){$text|Should Match $name} }

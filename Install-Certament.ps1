@@ -1012,9 +1012,25 @@ function Invoke-Install {
     $configPath = Join-Path $installPath "config.json"
     $enableWebhook = ($webhookCustomer -ne "" -or $webhookInternal -ne "")
 
+    # Preserve InstallationId across reinstalls/upgrades; generate once if absent.
+    $installationId = $null
+    if (Test-Path $configPath) {
+        try {
+            $existingConfig = Get-Content -Raw -Path $configPath | ConvertFrom-Json
+            if ($existingConfig.Context -and -not [string]::IsNullOrWhiteSpace([string]$existingConfig.Context.InstallationId)) {
+                $installationId = [string]$existingConfig.Context.InstallationId
+            }
+        }
+        catch { }
+    }
+    if ([string]::IsNullOrWhiteSpace($installationId)) {
+        $installationId = [guid]::NewGuid().ToString()
+    }
+
     $configObj = [ordered]@{
         Context = [ordered]@{
-            CustomerName = $customerName
+            CustomerName   = $customerName
+            InstallationId = $installationId
         }
         Pfx = [ordered]@{
             Path     = $pfxPath

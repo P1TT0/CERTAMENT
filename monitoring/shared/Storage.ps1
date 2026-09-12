@@ -1,34 +1,6 @@
-function New-JsonResponse {
-    param([int]$StatusCode,[object]$Body)
-    return [HttpResponseContext]@{
-        StatusCode = $StatusCode
-        Body = ($Body | ConvertTo-Json -Depth 12)
-        Headers = @{ 'Content-Type' = 'application/json' }
-    }
-}
-
-function Assert-HeartbeatToken {
-    param([object]$Request)
-    $expected=[string]$env:CERTAMENT_HEARTBEAT_TOKEN
-    if([string]::IsNullOrWhiteSpace($expected)){throw 'CERTAMENT_HEARTBEAT_TOKEN is not configured.'}
-    $provided=[string]$Request.Headers['x-certament-token']
-    if([string]::IsNullOrWhiteSpace($provided) -or $provided -cne $expected){throw 'Unauthorized heartbeat request.'}
-}
-
-function Get-TableHandle {
-    param([string]$Name)
-    $ctx=New-AzStorageContext -ConnectionString $env:AzureWebJobsStorage
-    $table=Get-AzStorageTable -Name $Name -Context $ctx -ErrorAction SilentlyContinue
-    if($null -eq $table){$table=New-AzStorageTable -Name $Name -Context $ctx}
-    return $table.CloudTable
-}
-
-function Get-HeartbeatState {
-    param([object]$Payload)
-    $now=[DateTime]::UtcNow
-    $stamp=[DateTime]::Parse([string]$Payload.timestampUtc).ToUniversalTime()
-    $age=($now-$stamp).TotalHours
-    $status=[string]$Payload.status
-    if($status -eq 'Error' -or $age -gt 48){$state='Critical'}elseif($status -match 'Warning|Awaiting|Failed' -or $age -gt 30 -or ([double]$Payload.certificateDaysRemaining -ge 0 -and [double]$Payload.certificateDaysRemaining -le 30)){$state='Warning'}else{$state='Healthy'}
-    return $state
-}
+. "$PSScriptRoot\model.ps1"
+. "$PSScriptRoot\keys.ps1"
+. "$PSScriptRoot\validation.ps1"
+function Get-TableHandle { param([string]$Name);$ctx=New-AzStorageContext -ConnectionString $env:AzureWebJobsStorage;$table=Get-AzStorageTable -Name $Name -Context $ctx -ErrorAction SilentlyContinue;if($null -eq $table){$table=New-AzStorageTable -Name $Name -Context $ctx};return $table.CloudTable }
+function Save-LatestHeartbeat { param($Table,$Payload,$State);$pk=Get-LatestPartitionKey $Payload.InstallationId;$props=@{InstallationId=[string]$Payload.InstallationId;Customer=[string]$Payload.customer;Server=[string]$Payload.server;Version=[string]$Payload.version;Status=$State;RunStatus=[string]$Payload.status;Stage=[string]$Payload.stage;Detail=[string]$Payload.detail;TimestampUtc=[string]$Payload.timestampUtc;DurationSec=$Payload.durationSec;CertificateDaysRemaining=$Payload.certificateDaysRemaining;NotificationStatus=[string]$Payload.notificationStatus;RunId=[string]$Payload.runId;SchemaVersion=[string]$Payload.schemaVersion};Add-AzTableRow -table $Table -partitionKey $pk -rowKey (Get-LatestRowKey) -property $props -UpdateExisting|Out-Null }
+function Save-HistoryHeartbeat { param($Table,$Payload,$State);$stamp=[DateTime]::Parse([string]$Payload.timestampUtc).ToUniversalTime();$props=@{InstallationId=[string]$Payload.InstallationId;Customer=[string]$Payload.customer;Server=[string]$Payload.server;Version=[string]$Payload.version;Status=$State;RunStatus=[string]$Payload.status;Stage=[string]$Payload.stage;Detail=[string]$Payload.detail;TimestampUtc=$stamp.ToString('o');DurationSec=$Payload.durationSec;CertificateDaysRemaining=$Payload.certificateDaysRemaining;NotificationStatus=[string]$Payload.notificationStatus;RunId=[string]$Payload.runId;SchemaVersion=[string]$Payload.schemaVersion};Add-AzTableRow -table $Table -partitionKey (Get-HistoryPartitionKey $Payload.InstallationId) -rowKey (Get-HistoryRowKey $stamp ([string]$Payload.runId)) -property $props|Out-Null }

@@ -1,6 +1,7 @@
 {
   "Context": {
-    "CustomerName": "<SET_CUSTOMER_NAME>"
+    "CustomerName": "<SET_CUSTOMER_NAME>",
+    "InstallationId": ""
   },
   "Pfx": {
     "Path": "C:\\_install",
