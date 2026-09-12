@@ -35,4 +35,9 @@ Describe 'Runner scenarios and safety contracts' {
     It 'defines independent expected outcome and oracle functions' { $text=Get-Content $runner -Raw;foreach($name in @('Get-ExpectedScenarioOutcome','Validate-PreparedScenario','Validate-ActualScenario')){$text|Should Match $name} }
     It 'reports provisioning outcome and actual outcome separately' { $text=Get-Content $runner -Raw;foreach($name in @('ProvisionValid','OutcomeValid','ExpectedOutcome','ActualOutcome','UnexpectedDrift','Failures')){$text|Should Match $name} }
     It 'does not use log-only PASS for renewal' { $text=Get-Content $runner -Raw;$text|Should Match 'Validate-ActualScenario';$text|Should Match 'Get-Drift' }
+    It 'defines ExpectedDrift and compares UnexpectedDrift' { $text=Get-Content $runner -Raw;$text|Should Match 'ExpectedDrift';$text|Should Match 'UnexpectedDrift' }
+    It 'requires scenario-specific negative categories' { $text=Get-Content $runner -Raw;foreach($category in @('PfxMissing','PfxPassword','PfxExpired','PfxNotNewer','EndpointIdentity','InvalidIdentity')){$text|Should Match $category} }
+    It 'has one Restart-BC definition' { [regex]::Matches((Get-Content $runner -Raw),'function Restart-BC').Count|Should Be 1 }
+    It 'checks prepared OLD BC/IIS/HTTP.sys state' { $text=Get-Content $runner -Raw;foreach($pattern in @('Prepared BC','Prepared IIS target','Prepared HTTP.sys','Prepared NEW PFX')){$text|Should Match $pattern} }
+    It 'reports complete actual outcome resources' { $text=Get-Content $runner -Raw;foreach($field in @("outcome.Add('Services'","outcome.Add('HttpSys'","outcome.Add('Certificate'","outcome.Add('ExpectedDrift'","outcome.Add('UnexpectedDrift")){$text|Should Match ([regex]::Escape($field))} }
 }

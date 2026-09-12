@@ -149,7 +149,6 @@ function Wait-ServiceState([string]$name,[string]$desired,[int]$timeout=120){
     do{$s=Get-Service -Name $name -ErrorAction Stop;if([string]$s.Status -eq $desired){return $true};Start-Sleep -Seconds 2}while((Get-Date)-lt $deadline)
     throw "Servizio $name non ha raggiunto lo stato $desired entro ${timeout}s. Stato attuale: $($s.Status)"
 }
-function Restart-BC([string]$instance){Restart-NAVServerInstance -ServerInstance $instance -ErrorAction Stop|Out-Null;Wait-ServiceState $instance 'Running' 120}
 function Set-BCServiceBaseline($row){
     $svc=Get-Service -Name $row.Instance -ErrorAction Stop
     $currentThumb=Get-BCThumbprintValue $row.Instance
@@ -438,32 +437,47 @@ function Get-ExpectedScenarioOutcome([string]$name,$prep,$prepared){
     $negative=$name -in @('PfxMissing','WrongPassword','PfxExpired','PfxNotNewer','WrongSan','UnrelatedPfx','EndpointIdentityMissing')
     $category=@{PfxMissing='PfxMissing';WrongPassword='PfxPassword';PfxExpired='PfxExpired';PfxNotNewer='PfxNotNewer';WrongSan='EndpointIdentity';UnrelatedPfx='InvalidIdentity';EndpointIdentityMissing='EndpointIdentity'}[$name]
     $expectedThumb='';if($success -and $null -ne $prep.New){$expectedThumb=Normalize-Thumb $prep.New.Thumbprint}elseif($noop -and $null -ne $prep.New){$expectedThumb=Normalize-Thumb $prep.New.Thumbprint}elseif($null -ne $prep.Old){$expectedThumb=Normalize-Thumb $prep.Old.Thumbprint}
-    return [pscustomobject]@{Scenario=$name;Kind=if($success){'Renewal'}elseif($noop){'NoOp'}else{'Negative'};ExpectedThumbprint=$expectedThumb;ExpectedInstances=if($name -eq 'MultiGroup'){@($TargetInstance,'MicrosoftDynamicsNavServer$PROD_NUP')}else{@($TargetInstance)};ExpectedFailureCategory=$category;RequireNoInfrastructureDrift=($noop -or $negative);RequireExitSuccess=($success -or $noop)}
+    $expectedDrift=if($noop -or $negative){@()}else{@('BC','IIS','HTTP.sys','Certificates','PFX')}
+    return [pscustomobject]@{Scenario=$name;Kind=if($success){'Renewal'}elseif($noop){'NoOp'}else{'Negative'};ExpectedThumbprint=$expectedThumb;ExpectedInstances=if($name -eq 'MultiGroup'){@($TargetInstance,'MicrosoftDynamicsNavServer$PROD_NUP')}else{@($TargetInstance)};ExpectedFailureCategory=$category;ExpectedDrift=@($expectedDrift);RequireNoInfrastructureDrift=($noop -or $negative);RequireExitSuccess=($success -or $noop)}
 }
 function Validate-PreparedScenario([string]$name,$before,$prepared,$prep){
     $failures=@();$expected=Get-ExpectedScenarioOutcome $name $prep $prepared
-    foreach($instance in @($expected.ExpectedInstances)){$row=Find-BCRow $prepared $instance;if($null -eq $row){$failures+="Prepared BC instance missing: $instance"}elseif([string]$row.ServiceStatus -notin @('Running','Stopped')){$failures+="Prepared BC service state invalid: $instance"}}
+    foreach($instance in @($expected.ExpectedInstances)){$row=Find-BCRow $prepared $instance;if($null -eq $row){$failures+="Prepared BC instance missing: $instance"}elseif([string]$row.ServiceStatus -notin @('Running','Stopped')){$failures+="Prepared BC service state invalid: $instance"}elseif($expected.Kind -eq 'Renewal' -and [string]$row.Thumbprint -ne $prep.Old.Thumbprint){$failures+="Prepared BC $instance expected OLD $($prep.Old.Thumbprint), actual $($row.Thumbprint)"}}
     if($name -in @('NoOp','AlreadyCurrent') -or $expected.Kind -eq 'Renewal'){
         if($null -eq $prep.Old -and $name -notin @('NoOp','AlreadyCurrent')){$failures+='Prepared OLD certificate metadata missing'}
         if($null -eq $prep.New){$failures+='Prepared NEW certificate metadata missing'}
     }
-    if($null -ne $prep.New){$new=@($prepared.Certificates|Where-Object Thumbprint -eq (Normalize-Thumb $prep.New.Thumbprint));if($new.Count -ne 1 -or -not [bool]$new[0].HasPrivateKey){$failures+='Prepared NEW certificate/private key missing'}}
-    if($null -ne $prep.Old){$old=@($prepared.Certificates|Where-Object Thumbprint -eq (Normalize-Thumb $prep.Old.Thumbprint));if($old.Count -ne 1 -or -not [bool]$old[0].HasPrivateKey){$failures+='Prepared OLD certificate/private key missing'}}
-    if($expected.Kind -eq 'Renewal' -and @($prepared.Pfx|Where-Object Name -like '*.pfx').Count -eq 0){$failures+='Prepared PFX inventory is empty'}
+    if($null -ne $prep.New){$new=@($prepared.Certificates|Where-Object Thumbprint -eq (Normalize-Thumb $prep.New.Thumbprint));$newCert=$new|Select-Object -First 1;if($new.Count -ne 1 -or $null -eq $newCert -or -not [bool]$newCert.HasPrivateKey){$failures+='Prepared NEW certificate/private key missing'};if(-not (Test-Path -LiteralPath $prep.New.PfxPath)){ $failures+='Prepared NEW PFX missing' }}
+    if($null -ne $prep.Old){$old=@($prepared.Certificates|Where-Object Thumbprint -eq (Normalize-Thumb $prep.Old.Thumbprint));$oldCert=$old|Select-Object -First 1;if($old.Count -ne 1 -or $null -eq $oldCert -or -not [bool]$oldCert.HasPrivateKey){$failures+='Prepared OLD certificate/private key missing'}}
+    if($expected.Kind -eq 'Renewal'){$pfxFiles=@($prepared.Pfx|Where-Object Name -like '*.pfx');if($pfxFiles.Count -eq 0){$failures+='Prepared PFX inventory is empty'};if($null -ne $prep.Old){$iis=Find-IISBinding $prepared $prep.Site $TargetBinding;if($null -eq $iis -or (Normalize-Thumb $iis.CertificateHash) -ne (Normalize-Thumb $prep.Old.Thumbprint)){$failures+='Prepared IIS target is not OLD'};$http=@($prepared.HttpSSL|Where-Object CertHash -eq (Normalize-Thumb $prep.Old.Thumbprint));if($http.Count -eq 0){$failures+='Prepared HTTP.sys has no OLD binding'}}}
+    if($name -eq 'PfxMissing' -and @($prepared.Pfx|Where-Object Name -like '*.pfx').Count -ne 0){$failures+='PfxMissing still has PFX files'}
+    if($name -eq 'WrongPassword' -and -not (Test-Path -LiteralPath (Join-Path $prep.LabPfxDir 'password.txt'))){$failures+='WrongPassword password file missing'}
+    if($name -eq 'PfxExpired' -and ([datetime]$prep.Bad.NotAfter -ge (Get-Date))){$failures+='PfxExpired candidate is not expired'}
+    if($name -eq 'PfxNotNewer' -and ([datetime]$prep.Bad.NotAfter -gt [datetime]$prep.Old.NotAfter)){$failures+='PfxNotNewer candidate is newer'}
+    if($name -in @('WrongSan','UnrelatedPfx') -and $prep.Bad.DnsNames -contains 'bc.cert.pitto'){$failures+="$name candidate unexpectedly matches endpoint identity"}
+    if($name -eq 'MultipleCandidates'){$names=@($prepared.Pfx|Select-Object -ExpandProperty Name);if($names -notcontains ($prep.New.FriendlyName+'.pfx') -or $names -notcontains ($prep.Bad.FriendlyName+'.pfx')){$failures+='MultipleCandidates GOOD/SHORT PFX inventory incomplete'}}
+    if($name -eq 'EndpointIdentityMissing'){$cfg=Get-ConfigObject;if($cfg.IIS.PSObject.Properties['ExpectedDnsNames']){$failures+='EndpointIdentityMissing still has ExpectedDnsNames'}}
     return [pscustomobject]@{Valid=($failures.Count -eq 0);Failures=@($failures);Expected=$expected}
 }
 function Validate-ActualScenario([string]$name,$exec,$prepared,$after,$prep,$runtimeDrift){
-    $expected=Get-ExpectedScenarioOutcome $name $prep $prepared;$failures=@();$unexpected=@();$outcome=[ordered]@{}
+    $expected=Get-ExpectedScenarioOutcome $name $prep $prepared;$failures=@();$unexpected=@();$outcome=@{}
     if($expected.RequireExitSuccess -and $exec.ExitCode -ne 0){$failures+="CERTAMENT exit code $($exec.ExitCode)"}
     if($exec.TimedOut){$failures+='CERTAMENT timed out'}
     $drift=@($runtimeDrift)
-    if($expected.RequireNoInfrastructureDrift -and $drift.Count -gt 0){$unexpected+=@($drift)}
-    foreach($instance in @($expected.ExpectedInstances)){$row=Find-BCRow $after $instance;if($null -eq $row){$failures+="Actual BC instance missing: $instance";continue};$outcome["BC:$instance"]=[string]$row.Thumbprint;if($expected.Kind -eq 'Renewal' -and ([string]$row.Thumbprint -ne $expected.ExpectedThumbprint -or [string]$row.ServiceStatus -ne 'Running' -or [string]$row.State -ne 'Running')){$failures+="BC $instance expected $($expected.ExpectedThumbprint)/Running/Running, actual $($row.Thumbprint)/$($row.ServiceStatus)/$($row.State)"}}
-    $iis=Find-IISBinding $after $prep.Site $TargetBinding;if($null -eq $iis){$failures+='Actual IIS target binding missing'}else{$outcome['IIS']=$iis.CertificateHash;if($expected.Kind -eq 'Renewal' -and (Normalize-Thumb $iis.CertificateHash) -ne $expected.ExpectedThumbprint){$failures+="IIS expected $($expected.ExpectedThumbprint), actual $($iis.CertificateHash)"}}
-    if($expected.Kind -eq 'Renewal'){$cert=@($after.Certificates|Where-Object Thumbprint -eq $expected.ExpectedThumbprint);if($cert.Count -ne 1 -or -not [bool]$cert[0].HasPrivateKey){$failures+='Expected final certificate/private key not observed'};foreach($h in @($prepared.HttpSSL|Where-Object CertHash -eq (Normalize-Thumb $prep.Old.Thumbprint))){$actual=Find-HttpSsl $after $h.Kind $h.Endpoint;if($null -eq $actual -or (Normalize-Thumb $actual.CertHash) -ne $expected.ExpectedThumbprint){$failures+="HTTP.sys $($h.Endpoint) expected $($expected.ExpectedThumbprint)"}}}
+    $unexpected+=@($drift|Where-Object{$_ -notin @($expected.ExpectedDrift)})
+    if($expected.RequireNoInfrastructureDrift -and $drift.Count -gt 0){$failures+="Infrastructure drift not expected: $($drift -join ', ')"}
+    foreach($instance in @($expected.ExpectedInstances)){$row=Find-BCRow $after $instance;if($null -eq $row){$failures+="Actual BC instance missing: $instance";continue};$outcome.Add(('BC:{0}' -f $instance),[string]$row.Thumbprint);if($expected.Kind -eq 'Renewal' -and ([string]$row.Thumbprint -ne $expected.ExpectedThumbprint -or [string]$row.ServiceStatus -ne 'Running' -or [string]$row.State -ne 'Running')){$failures+="BC $instance expected $($expected.ExpectedThumbprint)/Running/Running, actual $($row.Thumbprint)/$($row.ServiceStatus)/$($row.State)"}}
+    $iis=Find-IISBinding $after $prep.Site $TargetBinding;if($null -eq $iis){$failures+='Actual IIS target binding missing'}else{$outcome.Add('IIS',[pscustomobject]@{Binding=$prep.Site+':'+$TargetBinding;Thumbprint=(Normalize-Thumb $iis.CertificateHash);Store=$iis.CertificateStoreName});if($expected.Kind -eq 'Renewal' -and (Normalize-Thumb $iis.CertificateHash) -ne $expected.ExpectedThumbprint){$failures+="IIS expected $($expected.ExpectedThumbprint), actual $($iis.CertificateHash)"}}
+    if($expected.Kind -eq 'Renewal'){$cert=@($after.Certificates|Where-Object Thumbprint -eq $expected.ExpectedThumbprint);$actualCert=$cert|Select-Object -First 1;if($cert.Count -ne 1 -or $null -eq $actualCert -or -not [bool]$actualCert.HasPrivateKey){$failures+='Expected final certificate/private key not observed'};foreach($h in @($prepared.HttpSSL|Where-Object CertHash -eq (Normalize-Thumb $prep.Old.Thumbprint))){$actual=Find-HttpSsl $after $h.Kind $h.Endpoint;if($null -eq $actual -or (Normalize-Thumb $actual.CertHash) -ne $expected.ExpectedThumbprint){$failures+="HTTP.sys $($h.Endpoint) expected $($expected.ExpectedThumbprint)"}}}
     if($expected.Kind -eq 'Negative' -and $drift.Count -gt 0){$failures+="Negative scenario changed infrastructure: $($drift -join ', ')"}
     $stdout='';$stderr='';if(Test-Path -LiteralPath ([string]$exec.Stdout)){$stdout=Get-Content -LiteralPath ([string]$exec.Stdout) -Raw};if(Test-Path -LiteralPath ([string]$exec.Stderr)){$stderr=Get-Content -LiteralPath ([string]$exec.Stderr) -Raw};$categoryEvidence=($stdout+' '+$stderr)
-    if($expected.Kind -eq 'Negative' -and $categoryEvidence -notmatch 'PFX|Pfx|password|scaduto|recente|identit|SAN|endpoint'){ $failures+="Expected rejection category $($expected.ExpectedFailureCategory) not evidenced"}
+    $categoryPattern=''
+    if($expected.Kind -eq 'Negative'){$categoryPattern=@{PfxMissing='Nessun file PFX';PfxPassword='PFX unreadable or password invalid|ERROR_INVALID_PASSWORD|network password is not correct';PfxExpired='PFX.*scaduto|PFX certificate is expired';PfxNotNewer='non.*recente|not newer';EndpointIdentity='No configured IIS/BC\s+endpoint|SAN/DNS identity';InvalidIdentity='SAN/DNS identity'}[$expected.ExpectedFailureCategory]}
+    if($expected.Kind -eq 'Negative' -and [string]::IsNullOrWhiteSpace($categoryPattern)){ $failures+="No expected failure category defined" }elseif($expected.Kind -eq 'Negative' -and $categoryEvidence -notmatch $categoryPattern){$failures+="Expected rejection category $($expected.ExpectedFailureCategory) not evidenced"}
+    $outcome.Add('Services',@($after.BC|ForEach-Object{[pscustomobject]@{Instance=$_.Instance;WindowsService=$_.ServiceStatus;NAVState=$_.State}}))
+    $outcome.Add('HttpSys',@($after.HttpSSL|Where-Object{(Normalize-Thumb $_.CertHash) -eq $expected.ExpectedThumbprint}|ForEach-Object{[pscustomobject]@{Endpoint=$_.Endpoint;Thumbprint=$_.CertHash}}))
+    $outcome.Add('Certificate',@($after.Certificates|Where-Object{(Normalize-Thumb $_.Thumbprint) -eq $expected.ExpectedThumbprint}|ForEach-Object{[pscustomobject]@{Thumbprint=$_.Thumbprint;PrivateKey=$_.HasPrivateKey;Subject=$_.Subject;NotAfter=$_.NotAfter}}))
+    $outcome.Add('ExpectedDrift',@($expected.ExpectedDrift));$outcome.Add('UnexpectedDrift',@($unexpected))
     return [pscustomobject]@{Valid=($failures.Count -eq 0 -and $unexpected.Count -eq 0);Failures=@($failures);UnexpectedDrift=@($unexpected);Expected=$expected;Actual=[pscustomobject]$outcome}
 }
 function Invoke-Certament([string]$runDir){
@@ -602,7 +616,7 @@ function Run-One([string]$name){
         $exec=Invoke-Certament $runDir
         $after=New-Snapshot;Save-SnapshotArtifacts $after $runDir 'post-run';$runtimeDrift=@(Get-Drift $prepared $after);Save-Json $runtimeDrift (Join-Path $runDir 'runtime-drift.json')
         $oracle=Validate-ActualScenario $name $exec $prepared $after $prepInfo $runtimeDrift;$outcomeValid=$oracle.Valid;$expectedOutcome=$oracle.Expected;$actualOutcome=$oracle.Actual;$failures+=@($oracle.Failures);$unexpectedDrift=@($oracle.UnexpectedDrift);$result=if($outcomeValid){'PASS'}else{'FAIL'}
-    }catch{$err=$_.Exception.ToString();Set-Content -LiteralPath (Join-Path $runDir 'runner-error.txt') -Value $err -Encoding UTF8;$result='FAIL'}
+    }catch{$err=($_.Exception.ToString()+"`nLine=$($_.InvocationInfo.ScriptLineNumber)`nPosition=$($_.InvocationInfo.PositionMessage)");Set-Content -LiteralPath (Join-Path $runDir 'runner-error.txt') -Value $err -Encoding UTF8;$result='FAIL'}
     finally{
         if($null -ne $before){
             try{Restore-State $before $runDir}catch{$err += "`nRESTORE: $($_.Exception.ToString())";$restoreDrift=@('RestoreError')}
@@ -610,7 +624,7 @@ function Run-One([string]$name){
         }
     }
     if($restoreDrift.Count -gt 0){$result='FAIL'}
-    if($err){Set-Content -LiteralPath (Join-Path $runDir 'runner-error.txt') -Value $err -Encoding UTF8}
+    if($err){$failures+=$err;Set-Content -LiteralPath (Join-Path $runDir 'runner-error.txt') -Value $err -Encoding UTF8}
     if($restoreDrift.Count -gt 0){$failures+='RestoreDrift detected'}
     $r=[pscustomobject]@{Scenario=$name;Result=$(if($restoreDrift.Count -eq 0 -and $provisionValid -and $outcomeValid){$result}else{'FAIL'});ExitCode=$exec.ExitCode;TimedOut=$exec.TimedOut;DurationSeconds=$exec.Duration;ProvisionValid=$provisionValid;OutcomeValid=$outcomeValid;ExpectedOutcome=$expectedOutcome;ActualOutcome=$actualOutcome;Failures=@($failures);UnexpectedDrift=@($unexpectedDrift);RuntimeDrift=@($runtimeDrift);BaselineRestored=($restoreDrift.Count -eq 0);RestoreDrift=@($restoreDrift);RunDirectory=$runDir}
     Save-Json $r (Join-Path $runDir 'result.json');if($result -eq 'PASS'){Ok "$name PASS"}elseif($result -eq 'EXPECTED-GAP'){Warn "$name EXPECTED-GAP"}else{Fail "$name FAIL"};return $r
