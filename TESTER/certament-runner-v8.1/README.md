@@ -121,6 +121,24 @@ I run vengono salvati sotto `C:\ProgramData\EOS\Certament\ScenarioRunnerV8\runs\
 
 Il provisioning e' verificabile anche senza eseguire CERTAMENT con `-Action Provision`: crea certificati LAB reali nello store `LocalMachine\My`, esporta PFX, assegna OLD a BC/IIS/HTTP.sys, salva lo snapshot reale e verifica il rollback. `Recover` usa la baseline serializzata per ripristinare anche dopo un processo separato, inclusa la rimozione dei certificati LAB creati dalla run.
 
+Il risultato `PASS` e' determinato dal Runner tramite `Validate-PreparedScenario` e `Validate-ActualScenario`: exit code e log CERTAMENT sono evidenza diagnostica, non l'oracolo primario. Il report `result.json` separa `ProvisionValid`, `OutcomeValid`, `ExpectedOutcome`, `ActualOutcome`, `UnexpectedDrift`, `Failures` e `RestoreDrift`.
+
+### Release validation 2026-09-12
+
+Matrix E2E eseguita sulla VM Windows/Business Central:
+
+| Suite | Total | PASS | EXPECTED-GAP | FAIL | Baseline failures |
+|---|---:|---:|---:|---:|---:|
+| Core | 10 | 10 | 0 | 0 | 0 |
+| Renewal | 5 | 5 | 0 | 0 | 0 |
+| All | 15 | 15 | 0 | 0 | 0 |
+
+Il report All piu' recente e' `C:\ProgramData\EOS\Certament\ScenarioRunnerV8\20260912_135904_All.json`. Ogni scenario ha prodotto `ProvisionValid=true`, `OutcomeValid=true`, `BaselineRestored=true` e `RestoreDrift=[]`.
+
+Il Runner verifica indipendentemente BC thumbprint e stati Windows/NAV, binding IIS, binding HTTP.sys, certificate store/private key, drift prepared-post-run e drift baseline-post-restore. Un messaggio positivo nel log CERTAMENT o un exit code 0 da soli non possono produrre PASS.
+
+Copertura non simulata dalla suite: PKI/chain aziendale, trust client, CRL/OCSP, deployment live Azure, failure injection artificiale durante update parziali e topologie IIS con binding multipli reali appartenenti a certificate-group differenti.
+
 ## Limite di verifica
 
 La sandbox corrente non dispone di Windows PowerShell 5.1 + IIS + BC; quindi il pacchetto è stato sottoposto a revisione statica, confronto con il sorgente CERTAMENT release e coerenza con la VM analizzata. La verifica runtime finale deve avvenire sulla VM.

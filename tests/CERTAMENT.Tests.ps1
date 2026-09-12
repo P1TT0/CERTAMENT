@@ -32,4 +32,7 @@ Describe 'Endpoint identity' {
 Describe 'Runner scenarios and safety contracts' {
     It 'contains all required scenarios' { $text=Get-Content $runner -Raw; foreach($name in @('NoOp','PfxMissing','WrongPassword','PfxExpired','PfxNotNewer','WrongSan','MultipleCandidates','UnrelatedPfx','EndpointIdentityMissing','AlreadyCurrent','HappyPath','MultiGroup','RestartPolicy','EndpointIdentityConfigured','EndpointWildcard')){$text|Should Match $name} }
     It 'treats RestoreDrift as failure' { $text=Get-Content $runner -Raw;$text|Should Match 'restoreDrift\.Count -gt 0.*result=.FAIL.' }
+    It 'defines independent expected outcome and oracle functions' { $text=Get-Content $runner -Raw;foreach($name in @('Get-ExpectedScenarioOutcome','Validate-PreparedScenario','Validate-ActualScenario')){$text|Should Match $name} }
+    It 'reports provisioning outcome and actual outcome separately' { $text=Get-Content $runner -Raw;foreach($name in @('ProvisionValid','OutcomeValid','ExpectedOutcome','ActualOutcome','UnexpectedDrift','Failures')){$text|Should Match $name} }
+    It 'does not use log-only PASS for renewal' { $text=Get-Content $runner -Raw;$text|Should Match 'Validate-ActualScenario';$text|Should Match 'Get-Drift' }
 }
